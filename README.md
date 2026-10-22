@@ -5,9 +5,9 @@ documents under review; the client's team reads them in the browser, highlights 
 text, suggests replacements and pins comments; the comments flow back into the layout app as
 notes and tracked changes. One Rust binary, one SQLite file, one folder of review bundles.
 
-Status: the **service** (this repo's `server`) is done. The reviewer's web client (`web`,
-Leptos) and the app's round trip (`review.publish` / `review.sync`) come next. The bundle the
-app uploads is described in the app's `docs/review-bundle.md`.
+Status: the **service** (`server`) and the **reviewer's client** (`web`) are done; the app's
+round trip (`review.publish` / `review.sync`) comes next. The bundle the app uploads is
+described in the app's `docs/review-bundle.md`.
 
 ## Run it locally
 
@@ -17,6 +17,27 @@ ADMIN_TOKEN=$(openssl rand -base64 32) PUBLIC_ORIGIN=http://localhost:8080 cargo
 
 Without `SMTP_URL`/`MAIL_FROM`, mail is written to the log instead of sent, magic links
 included. Data goes to `./data` (`DATA_DIR`). `cargo test` walks the whole surface below.
+
+## The client
+
+`web` is a Leptos app (Rust compiled to WebAssembly, no JavaScript of its own) that the service
+serves for every path that isn't the API. `/r/{token}` is the share page: the documents and
+their versions, signing in by mail, joining a public link. `/r/{token}/d/{document}?v=…` is the
+viewer: the pages as images with an invisible, selectable text layer on top (so selection,
+find and screen readers work natively), a toolbar on the selection (Highlight · Comment ·
+Strike · Replace), a pin where the page is clicked, markers for every comment, and a panel with
+threads, resolve and filters. Other reviewers' comments arrive live (server-sent events), and a
+comment written while offline is kept in the browser and sent when the connection is back.
+
+```sh
+cargo install trunk --locked          # once
+cd web && trunk build --release       # → web/dist (about 250 KB of WebAssembly, gzipped)
+WEB_DIR=web/dist … cargo run -p server
+```
+
+The service hashes the page's inline loader script into its Content-Security-Policy at
+startup, so restart it after every `trunk build`. For development, `trunk serve` in `web/`
+proxies `/api` and `/auth` to a service on port 8080 (`web/Trunk.toml`).
 
 ## The API
 

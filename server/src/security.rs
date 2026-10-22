@@ -15,13 +15,13 @@ use crate::AppState;
 use crate::error::AppError;
 use crate::util;
 
-pub async fn headers_mw(req: Request, next: Next) -> Response {
+const DEFAULT_CSP: &str = "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+
+pub async fn headers_mw(State(st): State<AppState>, req: Request, next: Next) -> Response {
     let mut r = next.run(req).await;
     let h = r.headers_mut();
-    h.insert(
-        HeaderName::from_static("content-security-policy"),
-        HeaderValue::from_static("default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"),
-    );
+    let csp = st.web.as_ref().map_or_else(|| HeaderValue::from_static(DEFAULT_CSP), |w| w.csp.clone());
+    h.insert(HeaderName::from_static("content-security-policy"), csp);
     h.insert(HeaderName::from_static("x-content-type-options"), HeaderValue::from_static("nosniff"));
     h.insert(HeaderName::from_static("referrer-policy"), HeaderValue::from_static("no-referrer"));
     h.insert(HeaderName::from_static("x-frame-options"), HeaderValue::from_static("DENY"));

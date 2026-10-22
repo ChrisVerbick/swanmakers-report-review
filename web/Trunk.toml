@@ -1,0 +1,14 @@
+[build]
+target = "index.html"
+cargo_profile = "web"
+dist = "dist"
+public_url = "/"
+filehash = true
+
+[serve]
+# `trunk serve` proxies the API to a locally running server during development.
+[[proxy]]
+backend = "http://127.0.0.1:8080/api/"
+
+[[proxy]]
+backend = "http://127.0.0.1:8080/auth"

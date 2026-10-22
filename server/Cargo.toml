@@ -17,7 +17,7 @@ sha2 = "0.11.1"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "fs"] }
 tokio-stream = { version = "0.1.19", features = ["sync"] }
 tower = "0.5.3"
-tower-http = { version = "0.7.1", features = ["trace", "limit"] }
+tower-http = { version = "0.7.1", features = ["trace", "limit", "fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 uuid = { version = "1.28.0", features = ["v4"] }

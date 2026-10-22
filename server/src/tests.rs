@@ -382,3 +382,86 @@ async fn every_response_carries_the_security_headers() {
     assert_eq!(h.get("x-content-type-options").unwrap(), "nosniff");
     assert_eq!(h.get("referrer-policy").unwrap(), "no-referrer");
 }
+
+#[tokio::test]
+async fn the_client_is_served_under_a_hashed_csp_and_api_misses_stay_json() {
+    let web = std::env::temp_dir().join(format!("dcr-client-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&web);
+    std::fs::create_dir_all(web.join("assets")).unwrap();
+    std::fs::write(web.join("index.html"), "<!doctype html><html><head><script type=\"module\">console.log('hi')</script><script src=\"/app.js\"></script></head><body>the app</body></html>").unwrap();
+    std::fs::write(web.join("assets/app.css"), "body{}").unwrap();
+    let app = router(state("web").with_web_dir(&web).unwrap());
+    let (s, h, b) = call(&app, Method::GET, "/r/sometoken", &[], Body::empty()).await;
+    assert_eq!(s, StatusCode::OK, "a client route serves the app's page; got {}", String::from_utf8_lossy(&b));
+    assert!(String::from_utf8_lossy(&b).contains("the app"));
+    let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+    use base64::prelude::*;
+    use sha2::Digest;
+    let hash = format!("'sha256-{}'", BASE64_STANDARD.encode(sha2::Sha256::digest("console.log('hi')")));
+    assert!(csp.contains(&format!("script-src 'self' 'wasm-unsafe-eval' {hash}")), "{csp}");
+    assert!(csp.contains("style-src 'self'") && !csp.contains("unsafe-inline"), "{csp}");
+    let (s, h, _) = call(&app, Method::GET, "/assets/app.css", &[], Body::empty()).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(h.get("content-type").unwrap().to_str().unwrap().starts_with("text/css"));
+    let (s, h, _) = call(&app, Method::GET, "/api/nothing-here", &[], Body::empty()).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(h.get("content-type").unwrap().to_str().unwrap().starts_with("application/json"), "API misses stay JSON");
+    let app = router(state("noweb"));
+    let (s, ..) = call(&app, Method::GET, "/r/sometoken", &[], Body::empty()).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "without a web folder there is no page");
+}
+
+#[tokio::test]
+async fn a_public_share_page_says_whether_a_password_is_needed() {
+    let app = router(state("pwflag"));
+    let (project, ..) = project_with_version(&app).await;
+    for (password, expect) in [(json!(null), false), (json!("spring"), true)] {
+        let (s, _, l) =
+            json(&app, Method::POST, &format!("/api/projects/{project}/share-links"), &admin(false), json!({"mode": "public", "password": password}))
+                .await;
+        assert_eq!(s, StatusCode::CREATED);
+        let (s, _, page) = json(&app, Method::GET, &format!("/api/r/{}", l["token"].as_str().unwrap()), &[], Value::Null).await;
+        assert_eq!((s, page["password"].as_bool()), (StatusCode::OK, Some(expect)), "{page}");
+    }
+}
+
+#[tokio::test]
+async fn a_comment_posted_twice_with_its_own_id_is_stored_once() {
+    let app = router(state("idem"));
+    let (project, _, document, version) = project_with_version(&app).await;
+    let (s, _, l) = json(&app, Method::POST, &format!("/api/projects/{project}/share-links"), &admin(false), json!({"mode": "public"})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let token = l["token"].as_str().unwrap();
+    let (_, h, _) = json(&app, Method::POST, "/api/auth/guest", &[], json!({"link": token, "name": "Bob", "email": "bob@partner.example"})).await;
+    let cookie = cookie_of(&h);
+    let r = format!("/api/r/{token}");
+    let id = "0b1f6d6e-9c5b-4f2e-8a21-3f6e1b2c9d10";
+    let pin = json!({"id": id, "document": document, "version": version, "kind": "pin", "page": 0, "x": 1.0, "y": 2.0, "body": "once"});
+    for _ in 0..2 {
+        let (s, _, c) = json(&app, Method::POST, &format!("{r}/comments"), &[("cookie", &cookie), ("origin", ORIGIN)], pin.clone()).await;
+        assert_eq!((s, c["id"].as_str()), (StatusCode::CREATED, Some(id)), "{c}");
+    }
+    let reply_id = "7d3a2b1c-4e5f-4a6b-9c8d-0e1f2a3b4c5d";
+    for _ in 0..2 {
+        let (s, _, c) = json(
+            &app,
+            Method::POST,
+            &format!("{r}/comments/{id}/replies"),
+            &[("cookie", &cookie), ("origin", ORIGIN)],
+            json!({"id": reply_id, "body": "same"}),
+        )
+        .await;
+        assert_eq!((s, c["id"].as_str()), (StatusCode::CREATED, Some(reply_id)), "{c}");
+    }
+    let (_, _, list) = json(&app, Method::GET, &format!("{r}/comments?document={document}"), &[("cookie", &cookie)], Value::Null).await;
+    assert_eq!(list.as_array().unwrap().len(), 2, "{list}");
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/comments"),
+        &[("cookie", &cookie), ("origin", ORIGIN)],
+        json!({"id": "not-a-uuid", "document": document, "version": version, "kind": "pin", "page": 0, "x": 1.0, "y": 2.0}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}

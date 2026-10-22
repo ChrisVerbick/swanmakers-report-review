@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["server"]
+members = ["server", "web"]
 
 [workspace.package]
 version = "0.1.0"
@@ -20,3 +20,9 @@ unreachable = "deny"
 lto = true
 codegen-units = 1
 strip = true
+
+# The browser client: smallest code wins over speed.
+[profile.web]
+inherits = "release"
+opt-level = "z"
+panic = "abort"

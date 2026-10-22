@@ -91,9 +91,36 @@ pub async fn share_page(State(st): State<AppState>, Path(token): Path<String>, h
                 documents.push(json!({"id": id, "title": title, "versions": versions}));
             }
         }
-        Ok(json!({"project": {"id": a.link.project_id, "name": name, "client": client}, "mode": a.link.mode, "allowDownload": a.link.allow_download, "me": a.me, "documents": documents}))
+        Ok(json!({"project": {"id": a.link.project_id, "name": name, "client": client}, "mode": a.link.mode, "allowDownload": a.link.allow_download, "password": a.link.password_hash.is_some(), "me": a.me, "documents": documents}))
     })?;
     Ok(Json(v))
+}
+
+/// The client's own id for a comment (a lower-case UUID), or a fresh one.
+fn own_id(given: Option<&str>) -> Result<String> {
+    match given {
+        None => Ok(new_id()),
+        Some(id)
+            if id.len() == 36
+                && id
+                    .bytes()
+                    .enumerate()
+                    .all(|(i, b)| if [8, 13, 18, 23].contains(&i) { b == b'-' } else { b.is_ascii_hexdigit() && !b.is_ascii_uppercase() }) =>
+        {
+            Ok(id.to_string())
+        }
+        Some(_) => Err(AppError::BadRequest("id: a lower-case UUID".into())),
+    }
+}
+
+/// The comment already stored under a client's id, if any; another project's id is refused.
+fn existing(c: &Connection, id: &str, project: &str) -> Result<Option<Value>> {
+    let owner: Option<String> = c.query_row("SELECT project_id FROM comment WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+    match owner {
+        None => Ok(None),
+        Some(p) if p == project => comment_json(c, id).map(Some),
+        Some(_) => Err(AppError::Conflict("id: taken".into())),
+    }
 }
 
 fn version_in_project(c: &Connection, version: &str, project: &str) -> Result<(String, i64)> {
@@ -139,6 +166,8 @@ pub struct Quote {
 
 #[derive(Deserialize)]
 pub struct CommentIn {
+    /// The client's own id, so a retried request stores the comment once.
+    id: Option<String>,
     document: String,
     version: String,
     kind: String,
@@ -196,8 +225,11 @@ pub async fn create_comment(
     if c.rects.as_ref().is_some_and(|r| !r.is_array() || r.to_string().len() > 20_000) {
         return Err(bad("rects: a list of [left, top, right, bottom]"));
     }
-    let id = new_id();
+    let id = own_id(c.id.as_deref())?;
     let v = st.db.tx(|conn| {
+        if let Some(already) = existing(conn, &id, &a.link.project_id)? {
+            return Ok(already);
+        }
         let (document, pages) = version_in_project(conn, &c.version, &a.link.project_id)?;
         if document != c.document {
             return Err(bad("version: not of that document"));
@@ -225,6 +257,7 @@ pub async fn create_comment(
 
 #[derive(Deserialize)]
 pub struct ReplyIn {
+    id: Option<String>,
     body: String,
 }
 
@@ -241,8 +274,11 @@ pub async fn reply(
     if body.is_empty() {
         return Err(AppError::BadRequest("body: say something".into()));
     }
-    let id = new_id();
+    let id = own_id(r.id.as_deref())?;
     let v = st.db.tx(|c| {
+        if let Some(already) = existing(c, &id, &a.link.project_id)? {
+            return Ok(already);
+        }
         let p: Option<(String, String, i64, Option<String>)> = c
             .query_row("SELECT document_id, version_id, page, in_reply_to FROM comment WHERE id = ?1 AND project_id = ?2", params![parent, a.link.project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .optional()?;

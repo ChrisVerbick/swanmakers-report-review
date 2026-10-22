@@ -25,12 +25,17 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::http::header::HeaderValue;
 use axum::middleware;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{any, delete, get, patch, post};
+use base64::prelude::*;
+use sha2::Digest;
 use tokio::sync::broadcast;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::db::Db;
+use crate::error::AppError;
 use crate::events::Event;
 use crate::mail::Mailer;
 use crate::security::RateLimiter;
@@ -49,6 +54,15 @@ pub struct AppState {
     pub limiter: Arc<RateLimiter>,
     /// Behind Caddy (or another proxy that sets X-Forwarded-For).
     pub trust_proxy: bool,
+    /// The built reviewer client, when there is one to serve.
+    pub web: Option<Arc<WebAssets>>,
+}
+
+/// The reviewer client as Trunk built it (`dist/`), and the Content-Security-Policy its page
+/// needs: the inline loader scripts are hashed into it, so no `unsafe-inline`.
+pub struct WebAssets {
+    pub dir: PathBuf,
+    pub csp: HeaderValue,
 }
 
 impl AppState {
@@ -65,16 +79,54 @@ impl AppState {
             bus,
             limiter: Arc::new(RateLimiter::default()),
             trust_proxy,
+            web: None,
         })
     }
+
+    /// Serve the client built into `dir` (Trunk's `dist`) for every path that isn't the API.
+    pub fn with_web_dir(mut self, dir: &Path) -> Result<Self, String> {
+        let index = dir.join("index.html");
+        let html = std::fs::read_to_string(&index).map_err(|e| format!("{}: {e}", index.display()))?;
+        let hashes: String =
+            inline_scripts(&html).iter().map(|s| format!(" 'sha256-{}'", BASE64_STANDARD.encode(sha2::Sha256::digest(s.as_bytes())))).collect();
+        let csp = format!(
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{hashes}; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; \
+             frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        );
+        let csp = HeaderValue::from_str(&csp).map_err(|e| format!("content security policy: {e}"))?;
+        self.web = Some(Arc::new(WebAssets { dir: dir.to_path_buf(), csp }));
+        Ok(self)
+    }
+}
+
+/// The bodies of the page's inline `<script>` elements (those without `src`).
+fn inline_scripts(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = html;
+    while let Some(i) = rest.find("<script") {
+        let after = &rest[i..];
+        let Some(gt) = after.find('>') else { break };
+        let (tag, body) = (&after[..gt], &after[gt + 1..]);
+        let Some(end) = body.find("</script>") else { break };
+        if !tag.contains("src=") {
+            out.push(body[..end].to_string());
+        }
+        rest = &body[end..];
+    }
+    out
+}
+
+async fn api_miss() -> AppError {
+    AppError::NotFound("no such route".into())
 }
 
 pub fn router(st: AppState) -> Router {
     // Bundles are big; everything else is small.
     let upload = Router::new().route("/api/projects/{id}/versions", post(admin::upload_version)).layer(DefaultBodyLimit::max(64 << 20));
-    Router::new()
+    let r = Router::new()
         .route("/", get(|| async { "DesignCraft Review" }))
         .route("/auth", get(auth::landing))
+        .route("/auth.css", get(auth::landing_css))
         .route("/api/auth/request", post(auth::request))
         .route("/api/auth/consume", post(auth::consume))
         .route("/api/auth/guest", post(auth::guest))
@@ -94,10 +146,15 @@ pub fn router(st: AppState) -> Router {
         .route("/api/r/{token}/comments/{id}/replies", post(review::reply))
         .route("/api/r/{token}/events", get(review::events))
         .merge(upload)
-        .layer(DefaultBodyLimit::max(2 << 20))
+        .route("/api/{*rest}", any(api_miss));
+    let r = match &st.web {
+        Some(w) => r.fallback_service(ServeDir::new(&w.dir).fallback(ServeFile::new(w.dir.join("index.html")))),
+        None => r.fallback(api_miss),
+    };
+    r.layer(DefaultBodyLimit::max(2 << 20))
         .layer(middleware::from_fn_with_state(st.clone(), security::origin_mw))
         .layer(middleware::from_fn_with_state(st.clone(), security::ip_mw))
-        .layer(middleware::from_fn(security::headers_mw))
+        .layer(middleware::from_fn_with_state(st.clone(), security::headers_mw))
         .layer(TraceLayer::new_for_http())
         .with_state(st)
 }
@@ -114,6 +171,7 @@ async fn main() {
         std::process::exit(2);
     };
     let data_dir = PathBuf::from(env("DATA_DIR").unwrap_or_else(|| "data".into()));
+    let web_dir = env("WEB_DIR").map(PathBuf::from);
     let public_origin = env("PUBLIC_ORIGIN").unwrap_or_else(|| "http://localhost:8080".into());
     let bind = env("BIND").unwrap_or_else(|| "127.0.0.1:8080".into());
     let trust_proxy = env("TRUST_PROXY").is_some_and(|v| v == "1" || v == "true");
@@ -124,7 +182,10 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let st = match AppState::new(&data_dir, public_origin.clone(), admin_token, mailer, trust_proxy) {
+    let st = match AppState::new(&data_dir, public_origin.clone(), admin_token, mailer, trust_proxy).and_then(|s| match &web_dir {
+        Some(d) => s.with_web_dir(d),
+        None => Ok(s),
+    }) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");
@@ -138,7 +199,11 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    tracing::info!("listening on {bind}, public origin {public_origin}, data in {}", data_dir.display());
+    tracing::info!(
+        "listening on {bind}, public origin {public_origin}, data in {}, client {}",
+        data_dir.display(),
+        web_dir.as_ref().map_or("none".to_string(), |d| d.display().to_string())
+    );
     let served = axum::serve(listener, router(st).into_make_service_with_connect_info::<SocketAddr>()).with_graceful_shutdown(shutdown()).await;
     if let Err(e) = served {
         eprintln!("server: {e}");

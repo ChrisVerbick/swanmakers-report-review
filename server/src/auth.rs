@@ -186,12 +186,21 @@ pub async fn landing(Query(q): Query<LandingQuery>) -> Html<String> {
     let to = html_escape(&safe_to(q.to.as_deref()));
     Html(format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>Sign in</title><style>body{{font:16px/1.5 system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem}}\
-         button{{font:inherit;padding:.6rem 1.2rem}}</style></head><body><h1>Sign in to the review</h1>\
+         <title>Sign in</title><link rel=\"stylesheet\" href=\"/auth.css\"></head><body><h1>Sign in to the review</h1>\
          <p>Press the button to continue. The link works once and expires after 15 minutes.</p>\
          <form method=\"post\" action=\"/api/auth/consume\"><input type=\"hidden\" name=\"token\" value=\"{token}\">\
          <input type=\"hidden\" name=\"to\" value=\"{to}\"><button type=\"submit\">Continue</button></form></body></html>"
     ))
+}
+
+/// The landing page's stylesheet, a file so the Content-Security-Policy needs no inline styles.
+pub async fn landing_css() -> ([(axum::http::header::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        "body{font:16px/1.5 system-ui,-apple-system,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;color:#1b1b1a;background:#f4f4f2}\
+         button{font:inherit;padding:.6rem 1.2rem;border:0;border-radius:6px;background:#b2412f;color:#fff;cursor:pointer}\
+         @media(prefers-color-scheme:dark){body{color:#ececea;background:#17181a}}",
+    )
 }
 
 #[derive(Deserialize)]
