@@ -1,0 +1,8 @@
+{$REVIEW_HOST} {
+	encode zstd gzip
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	request_body {
+		max_size 70MB
+	}
+	reverse_proxy review:8080
+}

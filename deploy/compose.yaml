@@ -1,0 +1,57 @@
+# The review service behind Caddy (TLS from Let's Encrypt), with Litestream streaming the
+# SQLite file to S3-compatible storage. Copy .env.example to .env first.
+services:
+  review:
+    build: ..
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      BIND: 0.0.0.0:8080
+      DATA_DIR: /data
+      TRUST_PROXY: "1"
+    volumes:
+      - data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - "8080"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET / HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q 'DesignCraft Review' <&3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      REVIEW_HOST: ${REVIEW_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - review
+
+  litestream:
+    image: litestream/litestream:0.5
+    restart: unless-stopped
+    command: replicate -config /etc/litestream.yml
+    env_file: .env
+    volumes:
+      - data:/data
+      - ./litestream.yml:/etc/litestream.yml:ro
+    depends_on:
+      - review
+
+volumes:
+  data:
+  caddy_data:
+  caddy_config:

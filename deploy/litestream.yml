@@ -1,0 +1,15 @@
+# Continuous replication of the SQLite file to an S3-compatible bucket (Hetzner Object Storage
+# in the same region keeps every byte in the EU). Values come from deploy/.env.
+dbs:
+  - path: /data/db.sqlite
+    replicas:
+      - type: s3
+        bucket: ${LITESTREAM_BUCKET}
+        path: review/db
+        endpoint: ${LITESTREAM_ENDPOINT}
+        region: ${LITESTREAM_REGION}
+        access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+        secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+        force-path-style: true
+        retention: 720h
+        sync-interval: 1s
