@@ -369,6 +369,76 @@ pub async fn comments_json(State(st): State<AppState>, headers: HeaderMap, Path(
     Ok(Json(v))
 }
 
+/// Where the app's document is published: its project, the service's document and versions.
+pub async fn document_binding(State(st): State<AppState>, headers: HeaderMap, Path(app): Path<String>) -> Result<Json<Value>> {
+    require_admin(&st, &headers)?;
+    let v = st.db.with(|c| {
+        let row: Option<(String, String, String)> = c
+            .query_row("SELECT id, project_id, title FROM document WHERE app_document_id = ?1", [&app], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()?;
+        let Some((id, project, title)) = row else { return Err(AppError::NotFound("this document isn't published".into())) };
+        let versions: Vec<Value> = c
+            .prepare("SELECT id, n, label, uploaded, page_count FROM version WHERE document_id = ?1 ORDER BY n")?
+            .query_map([&id], |r| Ok(json!({"id": r.get::<_, String>(0)?, "n": r.get::<_, i64>(1)?, "label": r.get::<_, String>(2)?, "uploaded": r.get::<_, i64>(3)?, "pages": r.get::<_, i64>(4)?})))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(json!({"project": project_json(c, &project)?, "document": {"id": id, "appDocumentId": app, "title": title}, "versions": versions}))
+    })?;
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+pub struct OwnerReplyIn {
+    body: String,
+    name: Option<String>,
+}
+
+/// The owner answers a comment from the app. Replies are signed by one owner member per
+/// project, made on first use and renamed as the app says.
+pub async fn reply(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Extension(ClientIp(ip)): Extension<ClientIp>,
+    Json(r): Json<OwnerReplyIn>,
+) -> Result<(StatusCode, Json<Value>)> {
+    require_admin(&st, &headers)?;
+    let body = util::text(&r.body, 10_000, "body")?;
+    if body.is_empty() {
+        return Err(AppError::BadRequest("body: say something".into()));
+    }
+    let name = r.name.as_deref().map(|n| util::text(n, 100, "name")).transpose()?.filter(|n| !n.is_empty());
+    let reply_id = new_id();
+    let v = st.db.tx(|c| {
+        let parent: Option<(String, String, String, i64, Option<String>)> = c
+            .query_row("SELECT project_id, document_id, version_id, page, in_reply_to FROM comment WHERE id = ?1", [&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            .optional()?;
+        let Some((project, document, version, page, in_reply_to)) = parent else { return Err(AppError::NotFound("no such comment".into())) };
+        let owner: Option<String> = c.query_row("SELECT id FROM member WHERE project_id = ?1 AND email = 'owner@review.local'", [&project], |r| r.get(0)).optional()?;
+        let owner = match owner {
+            Some(m) => {
+                if let Some(n) = &name {
+                    c.execute("UPDATE member SET name = ?2 WHERE id = ?1", params![m, n])?;
+                }
+                m
+            }
+            None => {
+                let m = new_id();
+                c.execute("INSERT INTO member (id, project_id, email, name, role, created) VALUES (?1, ?2, 'owner@review.local', ?3, 'owner', ?4)", params![m, project, name.as_deref().unwrap_or("Owner"), now()])?;
+                m
+            }
+        };
+        let root = in_reply_to.unwrap_or_else(|| id.clone());
+        let t = now();
+        c.execute(
+            "INSERT INTO comment (id, project_id, document_id, version_id, author_id, kind, page, body, status, created, modified, in_reply_to) VALUES (?1, ?2, ?3, ?4, ?5, 'reply', ?6, ?7, 'open', ?8, ?8, ?9)",
+            params![reply_id, project, document, version, owner, page, body, t, root],
+        )?;
+        record(c, &st.bus, &project, "comment.replied", ACTOR, &ip, json!({"comment": root, "reply": reply_id}))?;
+        comment_json(c, &reply_id)
+    })?;
+    Ok((StatusCode::CREATED, Json(v)))
+}
+
 #[derive(Deserialize)]
 pub struct StatusIn {
     status: String,

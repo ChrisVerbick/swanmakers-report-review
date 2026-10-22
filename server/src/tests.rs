@@ -465,3 +465,44 @@ async fn a_comment_posted_twice_with_its_own_id_is_stored_once() {
     .await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn the_app_finds_a_document_s_project_by_its_own_id_and_replies_as_the_owner() {
+    let app = router(state("binding"));
+    let (s, ..) = json(&app, Method::GET, "/api/documents/doc-1", &admin(false), Value::Null).await;
+    assert_eq!(s, StatusCode::NOT_FOUND, "nothing published yet");
+    let (project, _, document, version) = project_with_version(&app).await;
+    let (s, _, b) = json(&app, Method::GET, "/api/documents/doc-1", &admin(false), Value::Null).await;
+    assert_eq!(s, StatusCode::OK, "{b}");
+    assert_eq!(
+        (b["project"]["id"].as_str(), b["project"]["name"].as_str(), b["document"]["id"].as_str()),
+        (Some(project.as_str()), Some("Annual report"), Some(document.as_str()))
+    );
+    assert_eq!(b["versions"][0]["id"], version);
+    // A guest comments; the owner replies through the admin API, as "Chris".
+    let (s, _, l) = json(&app, Method::POST, &format!("/api/projects/{project}/share-links"), &admin(false), json!({"mode": "public"})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let link = l["token"].as_str().unwrap();
+    let (_, h, _) = json(&app, Method::POST, "/api/auth/guest", &[], json!({"link": link, "name": "Bob", "email": "bob@partner.example"})).await;
+    let cookie = cookie_of(&h);
+    let (s, _, c) = json(
+        &app,
+        Method::POST,
+        &format!("/api/r/{link}/comments"),
+        &[("cookie", &cookie), ("origin", ORIGIN)],
+        json!({"document": document, "version": version, "kind": "note", "page": 0, "body": "Hi"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let id = c["id"].as_str().unwrap();
+    let (s, _, r) =
+        json(&app, Method::POST, &format!("/api/comments/{id}/replies"), &admin(false), json!({"body": "Will do", "name": "Chris"})).await;
+    assert_eq!(s, StatusCode::CREATED, "{r}");
+    assert_eq!((r["inReplyTo"].as_str(), r["author"]["name"].as_str(), r["author"]["role"].as_str()), (Some(id), Some("Chris"), Some("owner")));
+    let (_, _, list) = json(&app, Method::GET, &format!("/api/r/{link}/comments?document={document}"), &[("cookie", &cookie)], Value::Null).await;
+    assert_eq!(list.as_array().unwrap().len(), 2, "the reviewer sees the owner's reply: {list}");
+    let (s, _, again) = json(&app, Method::POST, &format!("/api/comments/{id}/replies"), &admin(false), json!({"body": "And again"})).await;
+    assert_eq!((s, again["author"]["name"].as_str()), (StatusCode::CREATED, Some("Chris")), "the owner member is reused");
+    let (s, ..) = json(&app, Method::POST, "/api/comments/nope/replies", &admin(false), json!({"body": "x"})).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

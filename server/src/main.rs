@@ -139,6 +139,8 @@ pub fn router(st: AppState) -> Router {
         .route("/api/share-links/{id}", delete(admin::revoke_link))
         .route("/api/projects/{id}/comments.json", get(admin::comments_json))
         .route("/api/comments/{id}", patch(admin::patch_comment))
+        .route("/api/comments/{id}/replies", post(admin::reply))
+        .route("/api/documents/{app}", get(admin::document_binding))
         .route("/api/r/{token}", get(review::share_page))
         .route("/api/r/{token}/v/{version}/{*path}", get(review::file))
         .route("/api/r/{token}/comments", get(review::list_comments).post(review::create_comment))
