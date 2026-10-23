@@ -506,3 +506,270 @@ async fn the_app_finds_a_document_s_project_by_its_own_id_and_replies_as_the_own
     let (s, ..) = json(&app, Method::POST, "/api/comments/nope/replies", &admin(false), json!({"body": "x"})).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+/// Upload a bundle for `app_id` into `project`: the service's (document, version) ids.
+async fn upload(app: &Router, project: &str, app_id: &str, title: &str) -> (String, String) {
+    let (s, _, v) = call(
+        app,
+        Method::POST,
+        &format!("/api/projects/{project}/versions"),
+        &[("authorization", "Bearer test-admin-token"), ("content-type", "application/zip")],
+        Body::from(bundle_zip(app_id, title)),
+    )
+    .await;
+    let v: Value = serde_json::from_slice(&v).unwrap();
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    (v["document"]["id"].as_str().unwrap().to_string(), v["version"]["id"].as_str().unwrap().to_string())
+}
+
+/// A guest of a public link on `project`: (link token, cookie).
+async fn guest(app: &Router, project: &str, name: &str, email: &str) -> (String, String) {
+    let (s, _, l) = json(app, Method::POST, &format!("/api/projects/{project}/share-links"), &admin(false), json!({"mode": "public"})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let token = l["token"].as_str().unwrap().to_string();
+    let (s, h, _) = json(app, Method::POST, "/api/auth/guest", &[], json!({"link": token, "name": name, "email": email})).await;
+    assert_eq!(s, StatusCode::OK);
+    (token, cookie_of(&h))
+}
+
+#[tokio::test]
+async fn rounds_show_a_version_of_each_document_and_lock_their_comments() {
+    let app = router(state("rounds"));
+    let (project, _, doc_a, a1) = project_with_version(&app).await;
+    let (doc_b, b1) = upload(&app, &project, "doc-2", "Appendix").await;
+    // Round 1: every document at its latest version, due in a week.
+    let (s, _, r1) =
+        json(&app, Method::POST, &format!("/api/projects/{project}/rounds"), &admin(false), json!({"name": "First read", "dueDays": 7})).await;
+    assert_eq!(s, StatusCode::CREATED, "{r1}");
+    assert_eq!((r1["n"].as_i64(), r1["name"].as_str(), r1["documents"].as_array().map(Vec::len)), (Some(1), Some("First read"), Some(2)));
+    assert!(r1["due"].as_i64().unwrap() > util_now() + 6 * 86_400);
+    let round1 = r1["id"].as_str().unwrap().to_string();
+    let (token, cookie) = guest(&app, &project, "Bob", "bob@partner.example").await;
+    let r = format!("/api/r/{token}");
+    let (s, _, page) = json(&app, Method::GET, &r, &[("cookie", &cookie)], Value::Null).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(page["current"], round1, "{page}");
+    assert_eq!(page["rounds"][0]["documents"].as_array().unwrap().len(), 2);
+    // A comment on a version in the open round carries the round.
+    let (s, _, c) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/comments"),
+        &[("cookie", &cookie), ("origin", ORIGIN)],
+        json!({"document": doc_a, "version": a1, "kind": "note", "page": 0, "body": "First"}),
+    )
+    .await;
+    assert_eq!((s, c["round"].as_str()), (StatusCode::CREATED, Some(round1.as_str())), "{c}");
+    // Lock it: no more comments or replies on its versions; the history stays readable.
+    let (s, _, locked) = json(&app, Method::POST, &format!("/api/rounds/{round1}/lock"), &admin(false), Value::Null).await;
+    assert_eq!((s, locked["locked"].is_i64()), (StatusCode::OK, true), "{locked}");
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/comments"),
+        &[("cookie", &cookie), ("origin", ORIGIN)],
+        json!({"document": doc_a, "version": a1, "kind": "note", "page": 0, "body": "Late"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "locked round");
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/comments/{}/replies", c["id"].as_str().unwrap()),
+        &[("cookie", &cookie), ("origin", ORIGIN)],
+        json!({"body": "late reply"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, list) = json(&app, Method::GET, &format!("{r}/comments?document={doc_a}&version={a1}"), &[("cookie", &cookie)], Value::Null).await;
+    assert_eq!((s, list.as_array().map(Vec::len)), (StatusCode::OK, Some(1)));
+    // Round 2 shows the new version of A and the old one of B.
+    let (_, a2) = upload(&app, &project, "doc-1", "Annual report 2026").await;
+    let (s, _, r2) = json(&app, Method::POST, &format!("/api/projects/{project}/rounds"), &admin(false), json!({})).await;
+    assert_eq!((s, r2["n"].as_i64(), r2["name"].as_str()), (StatusCode::CREATED, Some(2), Some("Round 2")), "{r2}");
+    let shown: Vec<(String, String)> =
+        r2["documents"].as_array().unwrap().iter().map(|d| (d["document"].as_str().unwrap().into(), d["version"].as_str().unwrap().into())).collect();
+    assert!(shown.contains(&(doc_a.clone(), a2.clone())) && shown.contains(&(doc_b.clone(), b1.clone())), "{shown:?}");
+    let (s, _, c2) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/comments"),
+        &[("cookie", &cookie), ("origin", ORIGIN)],
+        json!({"document": doc_a, "version": a2, "kind": "note", "page": 0, "body": "Second"}),
+    )
+    .await;
+    assert_eq!((s, c2["round"].as_str()), (StatusCode::CREATED, r2["id"].as_str()));
+    let (_, _, page) = json(&app, Method::GET, &r, &[("cookie", &cookie)], Value::Null).await;
+    assert_eq!((page["current"].as_str(), page["rounds"].as_array().map(Vec::len)), (r2["id"].as_str(), Some(2)));
+    assert!(page["rounds"][0]["locked"].is_i64() && page["rounds"][1]["locked"].is_null(), "oldest first: {}", page["rounds"]);
+    // The owner sees rounds in comments.json too.
+    let (_, _, all) = json(&app, Method::GET, &format!("/api/projects/{project}/comments.json"), &admin(false), Value::Null).await;
+    assert_eq!(all["rounds"].as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn decisions_are_one_per_reviewer_per_document_in_an_open_round() {
+    let app = router(state("decisions"));
+    let (project, _, doc_a, _) = project_with_version(&app).await;
+    let (s, _, r1) = json(&app, Method::POST, &format!("/api/projects/{project}/rounds"), &admin(false), json!({})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let round = r1["id"].as_str().unwrap().to_string();
+    let (token, bob) = guest(&app, &project, "Bob", "bob@partner.example").await;
+    let (_, cara) = guest(&app, &project, "Cara", "cara@partner.example").await;
+    let r = format!("/api/r/{token}");
+    let (s, _, d) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/decisions"),
+        &[("cookie", &bob), ("origin", ORIGIN)],
+        json!({"round": round, "document": doc_a, "value": "approved"}),
+    )
+    .await;
+    assert_eq!((s, d["value"].as_str(), d["name"].as_str()), (StatusCode::CREATED, Some("approved"), Some("Bob")), "{d}");
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/decisions"),
+        &[("cookie", &cara), ("origin", ORIGIN)],
+        json!({"round": round, "document": doc_a, "value": "changes", "note": "Page 2 again"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    // Bob changes his mind: still one decision of his.
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/decisions"),
+        &[("cookie", &bob), ("origin", ORIGIN)],
+        json!({"round": round, "document": doc_a, "value": "changes"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (_, _, page) = json(&app, Method::GET, &r, &[("cookie", &bob)], Value::Null).await;
+    let decisions = page["rounds"][0]["decisions"].as_array().unwrap();
+    assert_eq!(decisions.len(), 2, "{decisions:?}");
+    assert!(decisions.iter().all(|d| d["value"] == "changes"));
+    assert_eq!(page["rounds"][0]["mine"][doc_a.as_str()], "changes");
+    // Not in the round, a bad value, a locked round: refused.
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/decisions"),
+        &[("cookie", &bob), ("origin", ORIGIN)],
+        json!({"round": round, "document": "nope", "value": "approved"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/decisions"),
+        &[("cookie", &bob), ("origin", ORIGIN)],
+        json!({"round": round, "document": doc_a, "value": "maybe"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    json(&app, Method::POST, &format!("/api/rounds/{round}/lock"), &admin(false), Value::Null).await;
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/decisions"),
+        &[("cookie", &bob), ("origin", ORIGIN)],
+        json!({"round": round, "document": doc_a, "value": "approved"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn reminders_go_out_the_day_before_to_those_who_have_not_decided_and_once() {
+    let st = state("reminders");
+    let app = router(st.clone());
+    let (project, _, doc_a, _) = project_with_version(&app).await;
+    json(
+        &app,
+        Method::POST,
+        &format!("/api/projects/{project}/members"),
+        &admin(false),
+        json!({"email": "bob@acme.example", "name": "Bob", "role": "reviewer"}),
+    )
+    .await;
+    let (s, _, r1) = json(
+        &app,
+        Method::POST,
+        &format!("/api/projects/{project}/rounds"),
+        &admin(false),
+        json!({"name": "Final check", "due": util_now() + 20 * 3600}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let round = r1["id"].as_str().unwrap().to_string();
+    // Bob decided already; Ann hasn't.
+    let (_, bob) = guest(&app, &project, "Bob", "bob@acme.example").await;
+    let (token, _) = guest(&app, &project, "Zed", "zed@elsewhere.example").await;
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("/api/r/{token}/decisions"),
+        &[("cookie", &bob), ("origin", ORIGIN)],
+        json!({"round": round, "document": doc_a, "value": "approved"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED);
+    let before = st.mailer.outbox().len();
+    let sent = crate::rounds::remind_once(&st, util_now()).await.unwrap();
+    let mails: Vec<_> = st.mailer.outbox().into_iter().skip(before).collect();
+    assert_eq!((sent, mails.len()), (1, 1), "{mails:?}");
+    assert_eq!(mails[0].to, "ann@acme.example");
+    assert!(mails[0].body.contains("Final check") && mails[0].body.contains("Annual report"), "{}", mails[0].body);
+    assert_eq!(crate::rounds::remind_once(&st, util_now()).await.unwrap(), 0, "reminded once");
+    // A round due in three days waits.
+    let (s, ..) = json(&app, Method::POST, &format!("/api/projects/{project}/rounds"), &admin(false), json!({"dueDays": 3})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(crate::rounds::remind_once(&st, util_now()).await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn invites_mail_the_link_to_the_members() {
+    let st = state("invites");
+    let app = router(st.clone());
+    let (project, token, ..) = project_with_version(&app).await;
+    json(
+        &app,
+        Method::POST,
+        &format!("/api/projects/{project}/members"),
+        &admin(false),
+        json!({"email": "bob@acme.example", "name": "Bob", "role": "reviewer"}),
+    )
+    .await;
+    let (_, _, detail) = json(&app, Method::GET, &format!("/api/projects/{project}"), &admin(false), Value::Null).await;
+    let link_id = detail["links"][0]["id"].as_str().unwrap();
+    let (s, _, r) = json(&app, Method::POST, &format!("/api/share-links/{link_id}/invite"), &admin(false), json!({})).await;
+    assert_eq!((s, r["sent"].as_u64()), (StatusCode::OK, Some(2)), "{r}");
+    let mails = st.mailer.outbox();
+    assert_eq!(mails.len(), 2);
+    assert!(mails.iter().all(|m| m.body.contains(&format!("{ORIGIN}/r/{token}"))), "{mails:?}");
+    assert!(mails.iter().any(|m| m.to == "bob@acme.example"));
+    // Only the addresses given, when given: a later invite doesn't mail everyone again.
+    let before = st.mailer.outbox().len();
+    let (s, _, r) = json(
+        &app,
+        Method::POST,
+        &format!("/api/share-links/{link_id}/invite"),
+        &admin(false),
+        json!({"emails": ["bob@acme.example", "nobody@acme.example"]}),
+    )
+    .await;
+    assert_eq!((s, r["sent"].as_u64()), (StatusCode::OK, Some(1)), "{r}");
+    let after = st.mailer.outbox();
+    assert_eq!((after.len(), after[before].to.as_str()), (before + 1, "bob@acme.example"));
+    // A public link's token isn't kept, so it can't be mailed.
+    let (s, _, l) = json(&app, Method::POST, &format!("/api/projects/{project}/share-links"), &admin(false), json!({"mode": "public"})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, ..) = json(&app, Method::POST, &format!("/api/share-links/{}/invite", l["id"].as_str().unwrap()), &admin(false), json!({})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+fn util_now() -> i64 {
+    crate::util::now()
+}

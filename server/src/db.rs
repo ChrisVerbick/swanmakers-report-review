@@ -12,7 +12,8 @@ use crate::error::Result;
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE project (
     id TEXT PRIMARY KEY, name TEXT NOT NULL, client TEXT NOT NULL DEFAULT '',
     allow_download INTEGER NOT NULL DEFAULT 1, created INTEGER NOT NULL);
@@ -50,7 +51,23 @@ CREATE TABLE event (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT NOT NULL, kind TEXT NOT NULL,
     actor TEXT NOT NULL, ip TEXT NOT NULL DEFAULT '', payload TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX event_project ON event(project_id, seq);
-"#];
+"#,
+    r#"
+CREATE TABLE round (
+    id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES project(id), n INTEGER NOT NULL,
+    name TEXT NOT NULL, note TEXT NOT NULL DEFAULT '', opened INTEGER NOT NULL, due INTEGER,
+    locked INTEGER, reminded INTEGER, UNIQUE(project_id, n));
+CREATE TABLE round_doc (
+    round_id TEXT NOT NULL REFERENCES round(id), document_id TEXT NOT NULL REFERENCES document(id),
+    version_id TEXT NOT NULL REFERENCES version(id), PRIMARY KEY (round_id, document_id));
+CREATE TABLE decision (
+    round_id TEXT NOT NULL REFERENCES round(id), document_id TEXT NOT NULL REFERENCES document(id),
+    member_id TEXT NOT NULL REFERENCES member(id), value TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+    at INTEGER NOT NULL, PRIMARY KEY (round_id, document_id, member_id));
+ALTER TABLE comment ADD COLUMN round_id TEXT REFERENCES round(id);
+ALTER TABLE share_link ADD COLUMN token TEXT;
+"#,
+];
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {

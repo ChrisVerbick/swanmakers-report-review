@@ -47,9 +47,11 @@ Owner side (the app), `Authorization: Bearer $ADMIN_TOKEN`:
 |---|---|
 | `POST /api/projects {name, client?}` · `GET /api/projects` · `GET /api/projects/{id}` · `PATCH /api/projects/{id} {name?, client?, allowDownload?}` | projects; the detail has documents, versions, members, links and the last 200 audit events |
 | `POST /api/projects/{id}/members {email, name?, role: owner\|reviewer\|viewer}` · `DELETE …/members/{member}` | who may log in through invite links |
-| `POST /api/projects/{id}/share-links {mode: invite\|public, password?, expiresDays?}` → `{token, url}` · `DELETE /api/share-links/{id}` | share links; the token is stored hashed, so copy the URL when it is returned |
+| `POST /api/projects/{id}/share-links {mode: invite\|public, password?, expiresDays?}` → `{id, token, url}` · `DELETE /api/share-links/{id}` | share links; a public link's token is stored hashed (copy the URL when it is returned), an invite link's is kept so it can be mailed |
+| `POST /api/share-links/{id}/invite {emails?}` → `{sent}` | mails the invite link to the project's members (those listed in `emails`, or all) |
+| `POST /api/projects/{id}/rounds {name?, due? \| dueDays?, note?, documents?: [{document, version?}]}` · `GET …/rounds` · `POST /api/rounds/{id}/lock` | review rounds: which version of each document reviewers see (every document at its latest version by default) and until when; a locked round takes no more comments or decisions, and stays readable |
 | `POST /api/projects/{id}/versions` (body: the review bundle as a zip) | a new version of the document named in the bundle's manifest; a document belongs to the project it was first uploaded to (409 names it) |
-| `GET /api/projects/{id}/comments.json` | every comment with its anchors, for `review.sync` |
+| `GET /api/projects/{id}/comments.json` | every comment with its anchors (and `round`), plus the rounds with their decisions, for `review.sync` |
 | `PATCH /api/comments/{id} {status: open\|resolved\|applied\|orphaned}` | what the app did with a comment |
 
 Reviewer side, under the share link's token:
@@ -60,12 +62,19 @@ Reviewer side, under the share link's token:
 | `GET /auth?token=…&to=/r/…` → `POST /api/auth/consume` | the mail's landing page: a form posts the token (so a mail scanner can't use it up); 15-minute, single-use; sets the `__Host-sid` cookie |
 | `POST /api/auth/guest {link, name, email, password?}` | join a public link as a guest |
 | `POST /api/auth/logout` | |
-| `GET /api/r/{token}` | the share page: project, mode, `me`, documents and their versions; 401 `{error: "login"}` when a login is needed |
+| `GET /api/r/{token}` | the share page: project, mode, `me`, documents and their versions, `rounds` (each with `documents`, `decisions` and `mine`) and the `current` round; 401 `{error: "login"}` when a login is needed |
+| `POST /api/r/{token}/decisions {round, document, value: approved\|changes, note?}` | a reviewer's decision on a document of an open round; a second one replaces the first |
 | `GET /api/r/{token}/v/{version}/manifest.json \| text.json \| pages/NNN.webp \| document.pdf` | the bundle (the PDF only while the project allows downloads) |
 | `GET /api/r/{token}/comments?document=&version=` · `POST /api/r/{token}/comments` · `PATCH …/comments/{id}` · `POST …/comments/{id}/replies` | comments: `kind` pin \| highlight \| strike \| replace \| note, with `page`, and for text kinds `story`, `cell?`/`footnote?`, `start`, `end`, `quote {exact, prefix, suffix}`, `rects`; `replacement` for replace; authors edit their own; members (not guests) resolve |
 | `GET /api/r/{token}/events?since=` (SSE, `Last-Event-ID` honoured) | the project's audit events, backlog then live |
 
 Roles: `owner`, `reviewer`, `viewer` (reads only), `guest` (public links; can't resolve).
+
+## Mail the service sends
+
+Magic links on request, invites (`POST /api/share-links/{id}/invite`), and a reminder the day
+before a round is due to every member who hasn't decided on all its documents, checked every
+half hour and sent once per round. Without `SMTP_URL` the mail is logged instead.
 
 ## Deploy on a Hetzner VPS
 
@@ -128,6 +137,14 @@ Last drill: not yet.
   and `/tmp` are writable.
 - Every change is an audit event with actor, IP and time (`GET /api/projects/{id}` shows the
   last 200; the `event` table holds all of them).
+- Invite links keep their token in the database (public links only its hash), so invites and
+  the due-date reminder can mail the link. An invite link opens nothing by itself: the reviewer
+  still signs in with a code mailed to an address on the member list. A leaked database or
+  backup would show which project a link belongs to and let someone request sign-in mails for
+  members; `DELETE /api/share-links/{id}` revokes a link.
+- Decisions from guests of a public link carry whatever name they typed, marked "(guest)" to
+  reviewers and in the app; a round whose approvals must count as sign-off runs on an invite
+  link. Reminders go to members with addresses, never to guests.
 
 ## Data protection
 

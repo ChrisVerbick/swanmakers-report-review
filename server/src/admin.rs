@@ -258,8 +258,10 @@ pub async fn create_link(
     st.db.tx(|c| {
         project_json(c, &project)?;
         c.execute(
-            "INSERT INTO share_link (id, project_id, token_hash, mode, password_hash, expires, created) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, project, sha256_hex(&token), l.mode, password_hash, expires, now()],
+            // An invite link's token is kept, so invites and reminders can mail it; it opens
+            // nothing by itself (members sign in by mail). A public link's token is a key: hashed only.
+            "INSERT INTO share_link (id, project_id, token_hash, mode, password_hash, expires, created, token) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![id, project, sha256_hex(&token), l.mode, password_hash, expires, now(), (l.mode == "invite").then_some(&token)],
         )?;
         record(c, &st.bus, &project, "link.created", ACTOR, &ip, json!({"link": id, "mode": l.mode, "expires": expires}))?;
         Ok(())
@@ -364,7 +366,7 @@ pub async fn comments_json(State(st): State<AppState>, headers: HeaderMap, Path(
             .query_map([&project], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         let comments = ids.iter().map(|id| comment_json(c, id)).collect::<Result<Vec<_>>>()?;
-        Ok(json!({"project": p, "documents": documents_json(c, &project)?, "comments": comments}))
+        Ok(json!({"project": p, "documents": documents_json(c, &project)?, "comments": comments, "rounds": crate::rounds::rounds_json(c, &project, None)?}))
     })?;
     Ok(Json(v))
 }
@@ -437,6 +439,88 @@ pub async fn reply(
         comment_json(c, &reply_id)
     })?;
     Ok((StatusCode::CREATED, Json(v)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoundIn {
+    name: Option<String>,
+    due: Option<i64>,
+    due_days: Option<i64>,
+    #[serde(default)]
+    note: String,
+    documents: Option<Vec<Value>>,
+}
+
+/// A new round of the project: every document at its latest version unless `documents` says
+/// which; due at `due` (seconds) or in `dueDays`.
+pub async fn create_round(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(project): Path<String>,
+    Extension(ClientIp(ip)): Extension<ClientIp>,
+    Json(r): Json<RoundIn>,
+) -> Result<(StatusCode, Json<Value>)> {
+    require_admin(&st, &headers)?;
+    let due = match (r.due, r.due_days) {
+        (Some(d), _) if d > now() => Some(d),
+        (Some(_), _) => return Err(AppError::BadRequest("due: a time in the future (seconds)".into())),
+        (None, Some(days)) if (1..=3650).contains(&days) => Some(now() + days * 86_400),
+        (None, Some(_)) => return Err(AppError::BadRequest("dueDays: 1 to 3650".into())),
+        (None, None) => None,
+    };
+    let note = util::text(&r.note, 2_000, "note")?;
+    let v = st.db.tx(|c| {
+        project_json(c, &project)?;
+        crate::rounds::create(
+            c,
+            &st.bus,
+            &project,
+            &crate::rounds::NewRound { name: r.name.as_deref(), due, note: &note, documents: r.documents.as_deref() },
+            ACTOR,
+            &ip,
+        )
+    })?;
+    Ok((StatusCode::CREATED, Json(v)))
+}
+
+pub async fn list_rounds(State(st): State<AppState>, headers: HeaderMap, Path(project): Path<String>) -> Result<Json<Value>> {
+    require_admin(&st, &headers)?;
+    let v = st.db.with(|c| {
+        project_json(c, &project)?;
+        crate::rounds::rounds_json(c, &project, None)
+    })?;
+    Ok(Json(Value::Array(v)))
+}
+
+pub async fn lock_round(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Extension(ClientIp(ip)): Extension<ClientIp>,
+) -> Result<Json<Value>> {
+    require_admin(&st, &headers)?;
+    let v = st.db.tx(|c| crate::rounds::lock(c, &st.bus, &id, ACTOR, &ip))?;
+    Ok(Json(v))
+}
+
+/// Mail an invite link to the project's members.
+#[derive(Deserialize)]
+pub struct InviteIn {
+    /// Only these members; everyone on the list when absent.
+    emails: Option<Vec<String>>,
+}
+
+pub async fn invite(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Extension(ClientIp(ip)): Extension<ClientIp>,
+    Json(i): Json<InviteIn>,
+) -> Result<Json<Value>> {
+    require_admin(&st, &headers)?;
+    let sent = crate::rounds::invite(&st, &id, i.emails.as_deref(), &ip).await?;
+    Ok(Json(json!({"sent": sent})))
 }
 
 #[derive(Deserialize)]

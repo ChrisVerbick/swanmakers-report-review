@@ -14,6 +14,7 @@ mod error;
 mod events;
 mod mail;
 mod review;
+mod rounds;
 mod security;
 #[cfg(test)]
 mod tests;
@@ -141,6 +142,10 @@ pub fn router(st: AppState) -> Router {
         .route("/api/comments/{id}", patch(admin::patch_comment))
         .route("/api/comments/{id}/replies", post(admin::reply))
         .route("/api/documents/{app}", get(admin::document_binding))
+        .route("/api/projects/{id}/rounds", get(admin::list_rounds).post(admin::create_round))
+        .route("/api/rounds/{id}/lock", post(admin::lock_round))
+        .route("/api/share-links/{id}/invite", post(admin::invite))
+        .route("/api/r/{token}/decisions", post(review::decide))
         .route("/api/r/{token}", get(review::share_page))
         .route("/api/r/{token}/v/{version}/{*path}", get(review::file))
         .route("/api/r/{token}/comments", get(review::list_comments).post(review::create_comment))
@@ -194,6 +199,18 @@ async fn main() {
             std::process::exit(2);
         }
     };
+    // Reminders the day before a round is due, checked every half hour.
+    let reminders = st.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
+            match rounds::remind_once(&reminders, util::now()).await {
+                Ok(n) if n > 0 => tracing::info!("{n} reminder mail(s) sent"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("reminders: {e}"),
+            }
+        }
+    });
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(l) => l,
         Err(e) => {

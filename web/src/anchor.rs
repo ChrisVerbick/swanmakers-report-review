@@ -67,6 +67,7 @@ pub fn anchor(lines: &[Line], from: usize, to: usize) -> Option<Anchor> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -114,7 +115,7 @@ mod tests {
     fn empty_or_mixed_selections_have_no_anchor() {
         let a = line(3, 0, "one");
         let other = line(4, 0, "two");
-        assert_eq!(anchor(&[a.clone()], 2, 2), None);
+        assert_eq!(anchor(std::slice::from_ref(&a), 2, 2), None);
         assert_eq!(anchor(&[a, other], 0, 3), None);
         assert_eq!(anchor(&[], 0, 1), None);
     }

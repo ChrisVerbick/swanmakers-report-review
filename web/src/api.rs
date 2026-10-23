@@ -48,6 +48,64 @@ pub struct SharePage {
     pub password: bool,
     pub me: Option<Me>,
     pub documents: Vec<Document>,
+    /// The review rounds, oldest first.
+    #[serde(default)]
+    pub rounds: Vec<Round>,
+    /// The latest round's id.
+    #[serde(default)]
+    pub current: Option<String>,
+}
+
+/// A review round: which version of each document it shows, until when, and who decided what.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Round {
+    pub id: String,
+    pub n: i64,
+    pub name: String,
+    #[serde(default)]
+    pub note: String,
+    pub opened: i64,
+    #[serde(default)]
+    pub due: Option<i64>,
+    #[serde(default)]
+    pub locked: Option<i64>,
+    pub documents: Vec<RoundDoc>,
+    #[serde(default)]
+    pub decisions: Vec<Decision>,
+    /// My decision per document id.
+    #[serde(default)]
+    pub mine: std::collections::HashMap<String, String>,
+}
+
+impl Round {
+    /// The version of `document` this round shows.
+    pub fn version_of(&self, document: &str) -> Option<&RoundDoc> {
+        self.documents.iter().find(|d| d.document == document)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct RoundDoc {
+    pub document: String,
+    pub version: String,
+    pub title: String,
+    pub n: i64,
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Decision {
+    pub document: String,
+    pub member: String,
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+    pub value: String,
+    #[serde(default)]
+    pub note: String,
+    pub at: i64,
 }
 
 /// `401 {error: "login", mode, project}`.
@@ -168,6 +226,8 @@ pub struct Comment {
     pub modified: i64,
     #[serde(default)]
     pub in_reply_to: Option<String>,
+    #[serde(default)]
+    pub round: Option<String>,
     pub author: Author,
 }
 

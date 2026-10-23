@@ -53,7 +53,7 @@ fn commenter(a: &Access) -> Result<&Me> {
 pub fn comment_json(c: &Connection, id: &str) -> Result<Value> {
     c.query_row(
         "SELECT c.id, c.document_id, c.version_id, c.kind, c.page, c.story, c.cell, c.footnote, c.start, c.end, c.quote_exact, c.quote_prefix, c.quote_suffix, \
-         c.rects, c.x, c.y, c.body, c.replacement, c.status, c.created, c.modified, c.in_reply_to, m.id, m.name, m.email, m.role \
+         c.rects, c.x, c.y, c.body, c.replacement, c.status, c.created, c.modified, c.in_reply_to, m.id, m.name, m.email, m.role, c.round_id \
          FROM comment c JOIN member m ON m.id = c.author_id WHERE c.id = ?1",
         [id],
         |r| {
@@ -66,7 +66,7 @@ pub fn comment_json(c: &Connection, id: &str) -> Result<Value> {
                 "quote": {"exact": r.get::<_, Option<String>>(10)?, "prefix": r.get::<_, Option<String>>(11)?, "suffix": r.get::<_, Option<String>>(12)?},
                 "rects": json_col(13)?, "x": r.get::<_, Option<f64>>(14)?, "y": r.get::<_, Option<f64>>(15)?,
                 "body": r.get::<_, String>(16)?, "replacement": r.get::<_, Option<String>>(17)?, "status": r.get::<_, String>(18)?,
-                "created": r.get::<_, i64>(19)?, "modified": r.get::<_, i64>(20)?, "inReplyTo": r.get::<_, Option<String>>(21)?,
+                "created": r.get::<_, i64>(19)?, "modified": r.get::<_, i64>(20)?, "inReplyTo": r.get::<_, Option<String>>(21)?, "round": r.get::<_, Option<String>>(26)?,
                 "author": {"id": r.get::<_, String>(22)?, "name": r.get::<_, String>(23)?, "email": r.get::<_, String>(24)?, "role": r.get::<_, String>(25)?}
             }))
         },
@@ -91,7 +91,9 @@ pub async fn share_page(State(st): State<AppState>, Path(token): Path<String>, h
                 documents.push(json!({"id": id, "title": title, "versions": versions}));
             }
         }
-        Ok(json!({"project": {"id": a.link.project_id, "name": name, "client": client}, "mode": a.link.mode, "allowDownload": a.link.allow_download, "password": a.link.password_hash.is_some(), "me": a.me, "documents": documents}))
+        let rounds = crate::rounds::rounds_json(c, &a.link.project_id, a.me.as_ref().map(|m| m.id.as_str()))?;
+        let current = crate::rounds::current(c, &a.link.project_id)?;
+        Ok(json!({"project": {"id": a.link.project_id, "name": name, "client": client}, "mode": a.link.mode, "allowDownload": a.link.allow_download, "password": a.link.password_hash.is_some(), "me": a.me, "documents": documents, "rounds": rounds, "current": current}))
     })?;
     Ok(Json(v))
 }
@@ -238,15 +240,16 @@ pub async fn create_comment(
             return Err(bad("page: not in the document"));
         }
         let q = c.quote.unwrap_or_default();
+        let round = crate::rounds::round_for_comment(conn, &c.document, &c.version)?;
         let t = now();
         conn.execute(
-            "INSERT INTO comment (id, project_id, document_id, version_id, author_id, kind, page, story, cell, footnote, start, end, quote_exact, quote_prefix, quote_suffix, rects, x, y, body, replacement, status, created, modified) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 'open', ?21, ?21)",
+            "INSERT INTO comment (id, project_id, document_id, version_id, author_id, kind, page, story, cell, footnote, start, end, quote_exact, quote_prefix, quote_suffix, rects, x, y, body, replacement, status, created, modified, round_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 'open', ?21, ?21, ?22)",
             params![
                 id, a.link.project_id, c.document, c.version, me.id, c.kind, c.page, c.story,
                 c.cell.as_ref().map(Value::to_string), c.footnote, c.start, c.end,
                 anchored.then_some(q.exact.as_str()), anchored.then_some(q.prefix.as_str()), anchored.then_some(q.suffix.as_str()),
-                c.rects.as_ref().map(Value::to_string), c.x, c.y, body, replacement, t
+                c.rects.as_ref().map(Value::to_string), c.x, c.y, body, replacement, t, round
             ],
         )?;
         record(conn, &st.bus, &a.link.project_id, "comment.created", &me.id, &ip, json!({"comment": id, "document": c.document, "version": c.version, "kind": c.kind, "page": c.page}))?;
@@ -284,10 +287,11 @@ pub async fn reply(
             .optional()?;
         let Some((document, version, page, in_reply_to)) = p else { return Err(AppError::NotFound("no such comment".into())) };
         let root = in_reply_to.unwrap_or_else(|| parent.clone());
+        let round = crate::rounds::round_for_comment(c, &document, &version)?;
         let t = now();
         c.execute(
-            "INSERT INTO comment (id, project_id, document_id, version_id, author_id, kind, page, body, status, created, modified, in_reply_to) VALUES (?1, ?2, ?3, ?4, ?5, 'reply', ?6, ?7, 'open', ?8, ?8, ?9)",
-            params![id, a.link.project_id, document, version, me.id, page, body, t, root],
+            "INSERT INTO comment (id, project_id, document_id, version_id, author_id, kind, page, body, status, created, modified, in_reply_to, round_id) VALUES (?1, ?2, ?3, ?4, ?5, 'reply', ?6, ?7, 'open', ?8, ?8, ?9, ?10)",
+            params![id, a.link.project_id, document, version, me.id, page, body, t, root, round],
         )?;
         record(c, &st.bus, &a.link.project_id, "comment.replied", &me.id, &ip, json!({"comment": root, "reply": id}))?;
         comment_json(c, &id)
@@ -358,6 +362,38 @@ pub async fn patch_comment(
         comment_json(c, &id)
     })?;
     Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+pub struct DecisionIn {
+    round: String,
+    document: String,
+    value: String,
+    #[serde(default)]
+    note: String,
+}
+
+/// A reviewer's decision on a document of the open round: approved, or changes wanted.
+pub async fn decide(
+    State(st): State<AppState>,
+    Path(token): Path<String>,
+    headers: HeaderMap,
+    Extension(ClientIp(ip)): Extension<ClientIp>,
+    Json(d): Json<DecisionIn>,
+) -> Result<(StatusCode, Json<Value>)> {
+    let a = access(&st, &headers, &token)?;
+    let me = commenter(&a)?;
+    let note = util::text(&d.note, 2_000, "note")?;
+    let v = st.db.tx(|c| {
+        crate::rounds::decide(
+            c,
+            &st.bus,
+            &a.link.project_id,
+            &crate::rounds::Decision { round: &d.round, document: &d.document, member: &me.id, value: &d.value, note: &note },
+            &ip,
+        )
+    })?;
+    Ok((StatusCode::CREATED, Json(v)))
 }
 
 pub async fn list_comments(

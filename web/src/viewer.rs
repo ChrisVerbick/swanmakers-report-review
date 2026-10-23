@@ -20,6 +20,8 @@ struct Loaded {
     document: api::Document,
     version: api::Version,
     latest: bool,
+    /// The latest round showing this version, if any.
+    round: Option<api::Round>,
     manifest: Manifest,
     text: TextLayer,
 }
@@ -54,7 +56,8 @@ async fn load(token: String, document: String, want: Option<String>) -> Result<A
     let base = format!("{}/v/{}", api::api(&token), version.id);
     let manifest = api::get::<Manifest>(&format!("{base}/manifest.json")).await?;
     let text = api::get::<TextLayer>(&format!("{base}/text.json")).await?;
-    Ok(Arc::new(Loaded { token, page, document: doc, latest: version.id == latest.id, version, manifest, text }))
+    let round = page.rounds.iter().rev().find(|r| r.version_of(&document).is_some_and(|d| d.version == version.id)).cloned();
+    Ok(Arc::new(Loaded { token, page, document: doc, latest: version.id == latest.id, round, version, manifest, text }))
 }
 
 fn px(v: f64) -> String {
@@ -81,9 +84,12 @@ pub fn Viewer() -> impl IntoView {
     let notice = RwSignal::new(None::<String>);
     let tick = RwSignal::new(0u32);
     let bump = move || tick.update(|n| *n = n.wrapping_add(1));
+    // Bumped after a decision, so the round strip shows it.
+    let reload = RwSignal::new(0u32);
 
     // The share page, then the version's bundle; the zoom fits the first page to the window.
     Effect::new(move |_| {
+        reload.track();
         let (t, d, v) = (token.get(), doc_id.get(), want_version.get());
         loaded.set(None);
         spawn_local(async move {
@@ -201,7 +207,11 @@ pub fn Viewer() -> impl IntoView {
     };
 
     let can_comment = move || {
-        loaded.with(|l| l.as_ref().and_then(|r| r.as_ref().ok()).is_some_and(|l| l.latest && l.page.me.as_ref().is_some_and(|m| m.role != "viewer")))
+        loaded.with(|l| {
+            l.as_ref().and_then(|r| r.as_ref().ok()).is_some_and(|l| {
+                l.latest && l.round.as_ref().is_none_or(|r| r.locked.is_none()) && l.page.me.as_ref().is_some_and(|m| m.role != "viewer")
+            })
+        })
     };
     let can_resolve = move || {
         loaded.with(|l| {
@@ -239,7 +249,18 @@ pub fn Viewer() -> impl IntoView {
                             </span>
                             {l.page.allow_download.then(|| view! { <a class="button" href=format!("{}/v/{}/document.pdf", api::api(&l.token), l.version.id) download="">"PDF"</a> })}
                         </header>
+                        {l.round.as_ref().map(|r| {
+                            let (t, d) = (l.token.clone(), l.document.id.clone());
+                            let open = r.locked.is_none() && l.page.me.is_some();
+                            view! {
+                                <p class="banner round">
+                                    {crate::share::round_title(r)} " · " {crate::share::round_status(r)}
+                                    {open.then(|| view! { <crate::share::Decide token=t.clone() round=r.clone() document=d.clone() reload=move || reload.set(reload.get_untracked() + 1) /> })}
+                                </p>
+                            }
+                        })}
                         {(!l.latest).then(|| view! { <p class="banner">"This is an earlier version. Comments go on the latest one: " <a href=format!("/r/{}/d/{}", l.token, l.document.id)>"open it"</a>.</p> })}
+                        {(l.latest && l.round.as_ref().is_some_and(|r| r.locked.is_some())).then(|| view! { <p class="banner">"This round is locked: the version is read-only until the next round opens."</p> })}
                         {(l.page.me.is_none()).then(|| view! { <p class="banner">"You can read; to comment, " <a href=format!("/r/{}", l.token)>"join on the review page"</a>.</p> })}
                     };
                     let pages = pages_view(l.clone(), zoom, comments, sel, draft, selected, can_comment, start_draft);

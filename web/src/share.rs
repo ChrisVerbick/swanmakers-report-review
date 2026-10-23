@@ -6,7 +6,7 @@ use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use serde_json::{Value, json};
 
-use crate::api::{self, Failure, SharePage as Page};
+use crate::api::{self, Failure, Round, SharePage as Page};
 use crate::dom;
 
 #[component]
@@ -54,8 +54,38 @@ fn Documents(token: String, page: Page, reload: impl Fn() + Copy + Send + Sync +
             {me.as_ref().map(|m| view! { <p class="muted">{m.name.clone()} " · " {m.email.clone()} " · " <button class="link" on:click=signout>"Sign out"</button></p> })}
         </header>
         {join}
+        {(!page.rounds.is_empty()).then(|| view! {
+            <section>
+                <h2>"Rounds"</h2>
+                {page.rounds.iter().rev().map(|r| {
+                    let t = token.clone();
+                    let signed_in = me.is_some();
+                    view! {
+                        <article class="doc">
+                            <h3>{round_title(r)}</h3>
+                            <p class="muted">{round_status(r)}</p>
+                            {(!r.note.is_empty()).then(|| view! { <p>{r.note.clone()}</p> })}
+                            <ul class="versions">
+                                {r.documents.iter().map(|d| {
+                                    let href = format!("/r/{t}/d/{}?v={}", d.document, d.version);
+                                    let decided: Vec<String> = r.decisions.iter().filter(|x| x.document == d.document).map(|x| format!("{}{}: {}", x.name, if x.role == "guest" { " (guest)" } else { "" }, decision_word(&x.value))).collect();
+                                    view! {
+                                        <li>
+                                            <a href=href>{d.title.clone()}</a>
+                                            <span class="muted">" · " {if d.label.is_empty() { format!("Version {}", d.n) } else { d.label.clone() }}</span>
+                                            {(!decided.is_empty()).then(|| view! { <span class="muted">" · " {decided.join(" · ")}</span> })}
+                                            {(signed_in && r.locked.is_none()).then(|| view! { <Decide token=t.clone() round=r.clone() document=d.document.clone() reload=reload /> })}
+                                        </li>
+                                    }
+                                }).collect_view()}
+                            </ul>
+                        </article>
+                    }
+                }).collect_view()}
+            </section>
+        })}
         <section>
-            <h2>"Documents"</h2>
+            <h2>{if page.rounds.is_empty() { "Documents" } else { "All versions" }}</h2>
             {page.documents.iter().map(|d| {
                 let latest = d.versions.last().cloned();
                 let t = token.clone();
@@ -82,6 +112,64 @@ fn Documents(token: String, page: Page, reload: impl Fn() + Copy + Send + Sync +
             }).collect_view()}
             {page.documents.is_empty().then(|| view! { <p class="muted">"Nothing to review yet."</p> })}
         </section>
+    }
+}
+
+pub fn round_title(r: &Round) -> String {
+    if r.name == format!("Round {}", r.n) { r.name.clone() } else { format!("Round {} · {}", r.n, r.name) }
+}
+
+/// "due 2026-10-30", "locked 2026-11-02", or "open".
+pub fn round_status(r: &Round) -> String {
+    match (r.locked, r.due) {
+        (Some(at), _) => format!("Locked {}", dom::date(at)),
+        (None, Some(due)) => format!("Open · due {}", dom::date(due)),
+        (None, None) => "Open".into(),
+    }
+}
+
+pub fn decision_word(value: &str) -> &'static str {
+    if value == "approved" { "approved" } else { "changes wanted" }
+}
+
+/// Approve, or ask for changes with a note; shown as my decision once made (it can be changed
+/// while the round is open).
+#[component]
+pub fn Decide(token: String, round: Round, document: String, reload: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+    let token = StoredValue::new(token);
+    let round_id = StoredValue::new(round.id.clone());
+    let document = StoredValue::new(document.clone());
+    let mine = round.mine.get(&document.get_value()).cloned();
+    let asking = RwSignal::new(false);
+    let note = RwSignal::new(String::new());
+    let error = RwSignal::new(None::<String>);
+    let send = move |value: &'static str| {
+        let body = json!({"round": round_id.get_value(), "document": document.get_value(), "value": value, "note": note.get()});
+        let t = token.get_value();
+        spawn_local(async move {
+            match api::send::<Value>("POST", &format!("{}/decisions", api::api(&t)), &body).await {
+                Ok(_) => reload(),
+                Err(e) => error.set(Some(e.to_string())),
+            }
+        });
+    };
+    view! {
+        <span class="decide">
+            {mine.as_ref().map(|m| view! { <span class="mine">" · you: " {decision_word(m)}</span> })}
+            {move || if asking.get() {
+                view! {
+                    <input placeholder="What should change?" prop:value=move || note.get() on:input=move |ev| note.set(event_target_value(&ev)) />
+                    <button on:click=move |_| send("changes")>"Send"</button>
+                    <button class="link" on:click=move |_| asking.set(false)>"Cancel"</button>
+                }.into_any()
+            } else {
+                view! {
+                    {(mine.as_deref() != Some("approved")).then(|| view! { <button class="small" on:click=move |_| send("approved")>"Approve"</button> })}
+                    {(mine.as_deref() != Some("changes")).then(|| view! { <button class="small" on:click=move |_| asking.set(true)>"Request changes"</button> })}
+                }.into_any()
+            }}
+            {move || error.get().map(|e| view! { <span class="error">" " {e}</span> })}
+        </span>
     }
 }
 
