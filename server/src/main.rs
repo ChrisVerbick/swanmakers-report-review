@@ -10,9 +10,11 @@ mod admin;
 mod auth;
 mod bundle;
 mod db;
+mod digest;
 mod error;
 mod events;
 mod mail;
+mod retention;
 mod review;
 mod rounds;
 mod security;
@@ -39,7 +41,7 @@ use crate::db::Db;
 use crate::error::AppError;
 use crate::events::Event;
 use crate::mail::Mailer;
-use crate::security::RateLimiter;
+use crate::security::{RateLimiter, Turnstile};
 
 /// What every handler needs.
 #[derive(Clone)]
@@ -57,6 +59,8 @@ pub struct AppState {
     pub trust_proxy: bool,
     /// The built reviewer client, when there is one to serve.
     pub web: Option<Arc<WebAssets>>,
+    /// Turnstile on the sign-in and join forms, when configured.
+    pub turnstile: Option<Turnstile>,
 }
 
 /// The reviewer client as Trunk built it (`dist/`), and the Content-Security-Policy its page
@@ -81,7 +85,29 @@ impl AppState {
             limiter: Arc::new(RateLimiter::default()),
             trust_proxy,
             web: None,
+            turnstile: None,
         })
+    }
+
+    /// Guard sign-ins and guest joins with Turnstile: `verify` says whether a token passed.
+    pub fn with_turnstile(mut self, site_key: &str, verify: crate::security::Verify) -> Self {
+        self.turnstile = Some(Turnstile { site_key: site_key.to_string(), verify });
+        self
+    }
+
+    /// Refuse when Turnstile is configured and `token` doesn't pass.
+    pub async fn check_turnstile(&self, token: Option<&str>, ip: &str) -> Result<(), AppError> {
+        let Some(t) = &self.turnstile else { return Ok(()) };
+        let token = token.unwrap_or("").trim().to_string();
+        if token.is_empty() || token.len() > 2048 || !(t.verify)(token, ip.to_string()).await {
+            return Err(AppError::BadRequest("turnstile: the check didn't pass; reload the page and try again".into()));
+        }
+        Ok(())
+    }
+
+    /// The site key the client renders the widget with.
+    pub fn turnstile_key(&self) -> Option<&str> {
+        self.turnstile.as_ref().map(|t| t.site_key.as_str())
     }
 
     /// Serve the client built into `dir` (Trunk's `dist`) for every path that isn't the API.
@@ -90,9 +116,12 @@ impl AppState {
         let html = std::fs::read_to_string(&index).map_err(|e| format!("{}: {e}", index.display()))?;
         let hashes: String =
             inline_scripts(&html).iter().map(|s| format!(" 'sha256-{}'", BASE64_STANDARD.encode(sha2::Sha256::digest(s.as_bytes())))).collect();
+        // Turnstile's widget is a script and an iframe from Cloudflare.
+        let (cf_script, cf_frame) =
+            if self.turnstile.is_some() { (" https://challenges.cloudflare.com", "frame-src https://challenges.cloudflare.com; ") } else { ("", "") };
         let csp = format!(
-            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{hashes}; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; \
-             frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'{hashes}{cf_script}; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; \
+             {cf_frame}frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         );
         let csp = HeaderValue::from_str(&csp).map_err(|e| format!("content security policy: {e}"))?;
         self.web = Some(Arc::new(WebAssets { dir: dir.to_path_buf(), csp }));
@@ -117,6 +146,17 @@ fn inline_scripts(html: &str) -> Vec<String> {
     out
 }
 
+/// For uptime checks: the database answers and the data folder is there.
+async fn healthz(axum::extract::State(st): axum::extract::State<AppState>) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    let db = st.db.with(|c| Ok(c.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))?)).map(|_| "ok").unwrap_or("failed");
+    let data = if st.data_dir.join("versions").is_dir() { "ok" } else { "missing" };
+    let ok = db == "ok" && data == "ok";
+    (
+        if ok { axum::http::StatusCode::OK } else { axum::http::StatusCode::SERVICE_UNAVAILABLE },
+        axum::Json(serde_json::json!({"ok": ok, "db": db, "data": data, "version": env!("CARGO_PKG_VERSION")})),
+    )
+}
+
 async fn api_miss() -> AppError {
     AppError::NotFound("no such route".into())
 }
@@ -126,6 +166,7 @@ pub fn router(st: AppState) -> Router {
     let upload = Router::new().route("/api/projects/{id}/versions", post(admin::upload_version)).layer(DefaultBodyLimit::max(64 << 20));
     let r = Router::new()
         .route("/", get(|| async { "DesignCraft Review" }))
+        .route("/healthz", get(healthz))
         .route("/auth", get(auth::landing))
         .route("/auth.css", get(auth::landing_css))
         .route("/api/auth/request", post(auth::request))
@@ -189,10 +230,23 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let st = match AppState::new(&data_dir, public_origin.clone(), admin_token, mailer, trust_proxy).and_then(|s| match &web_dir {
-        Some(d) => s.with_web_dir(d),
-        None => Ok(s),
-    }) {
+    let turnstile = match (env("TURNSTILE_SITE_KEY"), env("TURNSTILE_SECRET")) {
+        (Some(k), Some(s)) => Some(Turnstile::cloudflare(&k, &s)),
+        (None, None) => None,
+        _ => {
+            eprintln!("TURNSTILE_SITE_KEY and TURNSTILE_SECRET go together");
+            std::process::exit(2);
+        }
+    };
+    let st = match AppState::new(&data_dir, public_origin.clone(), admin_token, mailer, trust_proxy)
+        .map(|mut s| {
+            s.turnstile = turnstile;
+            s
+        })
+        .and_then(|s| match &web_dir {
+            Some(d) => s.with_web_dir(d),
+            None => Ok(s),
+        }) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");
@@ -208,6 +262,25 @@ async fn main() {
                 Ok(n) if n > 0 => tracing::info!("{n} reminder mail(s) sent"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!("reminders: {e}"),
+            }
+        }
+    });
+    // The daily digest and the retention sweep, each at its hour (UTC).
+    let digest_hour = env("DIGEST_HOUR").and_then(|h| h.parse::<i64>().ok()).filter(|h| (0..24).contains(h)).unwrap_or(7);
+    let retention_days = env("RETENTION_DAYS").and_then(|d| d.parse::<i64>().ok()).filter(|d| *d > 0).unwrap_or(90);
+    let daily = st.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(util::secs_until_hour(util::now(), digest_hour))).await;
+            match digest::run_once(&daily, util::now()).await {
+                Ok(n) if n > 0 => tracing::info!("{n} digest mail(s) sent"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("digest: {e}"),
+            }
+            match retention::run_once(&daily, util::now(), retention_days) {
+                Ok(n) if n > 0 => tracing::info!("{n} closed project(s) deleted after {retention_days} days"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("retention: {e}"),
             }
         }
     });

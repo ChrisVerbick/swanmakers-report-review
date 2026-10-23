@@ -202,7 +202,7 @@ pub fn decide(c: &Connection, bus: &tokio::sync::broadcast::Sender<crate::events
 }
 
 /// The project's invite link that can be mailed (its token is kept for invite links), newest.
-fn mailable_link(c: &Connection, project: &str, origin: &str) -> Result<Option<String>> {
+pub fn mailable_link(c: &Connection, project: &str, origin: &str) -> Result<Option<String>> {
     let token: Option<String> = c
         .query_row(
             "SELECT token FROM share_link WHERE project_id = ?1 AND token IS NOT NULL AND revoked IS NULL ORDER BY created DESC LIMIT 1",
@@ -215,7 +215,7 @@ fn mailable_link(c: &Connection, project: &str, origin: &str) -> Result<Option<S
 
 /// Members to mail: invited ones with an address of their own (not guests, not the owner the
 /// app replies as).
-fn mailable_members(c: &Connection, project: &str) -> Result<Vec<(String, String, String)>> {
+pub fn mailable_members(c: &Connection, project: &str) -> Result<Vec<(String, String, String)>> {
     Ok(c.prepare("SELECT id, email, name FROM member WHERE project_id = ?1 AND role IN ('owner', 'reviewer') AND email <> 'owner@review.local' ORDER BY created")?
         .query_map([project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?)

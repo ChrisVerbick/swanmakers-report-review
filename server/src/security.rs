@@ -2,8 +2,10 @@
 //! small rate limiter.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::SocketAddr;
-use std::sync::{Mutex, PoisonError};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::header::{HeaderValue, ORIGIN};
@@ -81,4 +83,42 @@ impl RateLimiter {
         e.0 = e.0.saturating_add(1);
         e.0 <= limit
     }
+}
+
+/// Checks a Turnstile token for an IP: true when the challenge passed.
+pub type Verify = Arc<dyn Fn(String, String) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+
+/// Cloudflare Turnstile on the sign-in and join forms, when configured.
+#[derive(Clone)]
+pub struct Turnstile {
+    pub site_key: String,
+    pub verify: Verify,
+}
+
+impl Turnstile {
+    pub fn cloudflare(site_key: &str, secret: &str) -> Self {
+        let secret = secret.to_string();
+        let verify: Verify = Arc::new(move |token: String, ip: String| {
+            let secret = secret.clone();
+            Box::pin(async move { tokio::task::spawn_blocking(move || siteverify(&secret, &token, &ip)).await.unwrap_or(false) })
+        });
+        Self { site_key: site_key.to_string(), verify }
+    }
+}
+
+/// Ask Cloudflare whether `token` is good for `ip`.
+fn siteverify(secret: &str, token: &str, ip: &str) -> bool {
+    let sent = ureq::post("https://challenges.cloudflare.com/turnstile/v0/siteverify").send_form([
+        ("secret", secret),
+        ("response", token),
+        ("remoteip", ip),
+    ]);
+    let body = match sent {
+        Ok(mut r) => r.body_mut().read_to_string().unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!("turnstile: {e}");
+            return false;
+        }
+    };
+    serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|v| v["success"].as_bool()).unwrap_or(false)
 }

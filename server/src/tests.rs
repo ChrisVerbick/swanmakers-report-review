@@ -773,3 +773,172 @@ async fn invites_mail_the_link_to_the_members() {
 fn util_now() -> i64 {
     crate::util::now()
 }
+
+#[tokio::test]
+async fn drawings_are_comments_with_a_path() {
+    let app = router(state("draw"));
+    let (project, _, doc, version) = project_with_version(&app).await;
+    let (token, cookie) = guest(&app, &project, "Bob", "bob@partner.example").await;
+    let r = format!("/api/r/{token}");
+    let h = [("cookie", cookie.as_str()), ("origin", ORIGIN)];
+    let (s, _, c) = json(&app, Method::POST, &format!("{r}/comments"), &h, json!({"document": doc, "version": version, "kind": "draw", "page": 0, "path": [[10.0, 10.0], [20.0, 30.5], [40.0, 35.0]], "body": "Move this up"})).await;
+    assert_eq!((s, c["kind"].as_str()), (StatusCode::CREATED, Some("draw")), "{c}");
+    assert_eq!(c["path"][1], json!([20.0, 30.5]));
+    let (s, ..) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/comments"),
+        &h,
+        json!({"document": doc, "version": version, "kind": "draw", "page": 0, "body": "no path"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let long: Vec<[f64; 2]> = (0..3000).map(|i| [i as f64, 0.0]).collect();
+    let (s, ..) =
+        json(&app, Method::POST, &format!("{r}/comments"), &h, json!({"document": doc, "version": version, "kind": "draw", "page": 0, "path": long}))
+            .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "capped");
+    let (_, _, list) = json(&app, Method::GET, &format!("{r}/comments?document={doc}&version={version}"), &[("cookie", &cookie)], Value::Null).await;
+    assert_eq!(list[0]["path"].as_array().map(Vec::len), Some(3));
+}
+
+#[tokio::test]
+async fn mentions_mail_the_member_named() {
+    let st = state("mentions");
+    let app = router(st.clone());
+    let (project, _, doc, version) = project_with_version(&app).await;
+    json(
+        &app,
+        Method::POST,
+        &format!("/api/projects/{project}/members"),
+        &admin(false),
+        json!({"email": "bob@acme.example", "name": "Bob Example", "role": "reviewer"}),
+    )
+    .await;
+    let (token, cara) = guest(&app, &project, "Cara", "cara@partner.example").await;
+    let r = format!("/api/r/{token}");
+    let h = [("cookie", cara.as_str()), ("origin", ORIGIN)];
+    let before = st.mailer.outbox().len();
+    let (s, _, c) = json(
+        &app,
+        Method::POST,
+        &format!("{r}/comments"),
+        &h,
+        json!({"document": doc, "version": version, "kind": "note", "page": 0, "x": 10, "y": 10, "body": "@bob please check page 2"}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{c}");
+    let mails = st.mailer.outbox();
+    assert_eq!(mails.len(), before + 1, "{mails:?}");
+    assert_eq!(mails[before].to, "bob@acme.example");
+    assert!(
+        mails[before].body.contains("Cara") && mails[before].body.contains("please check page 2") && mails[before].body.contains("Annual report"),
+        "{}",
+        mails[before].body
+    );
+    // Nobody by that name, or yourself: no mail. A reply mentions too.
+    json(
+        &app,
+        Method::POST,
+        &format!("{r}/comments"),
+        &h,
+        json!({"document": doc, "version": version, "kind": "note", "page": 0, "x": 1, "y": 1, "body": "@nobody @cara hello"}),
+    )
+    .await;
+    assert_eq!(st.mailer.outbox().len(), before + 1);
+    let (s, ..) =
+        json(&app, Method::POST, &format!("{r}/comments/{}/replies", c["id"].as_str().unwrap()), &h, json!({"body": "@Bob Example agreed?"})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    assert_eq!(st.mailer.outbox().len(), before + 2);
+}
+
+#[tokio::test]
+async fn the_daily_digest_goes_to_the_owners_once() {
+    let st = state("digest");
+    let app = router(st.clone());
+    let (project, _, doc, version) = project_with_version(&app).await;
+    json(
+        &app,
+        Method::POST,
+        &format!("/api/projects/{project}/members"),
+        &admin(false),
+        json!({"email": "chris@studio.example", "name": "Chris", "role": "owner"}),
+    )
+    .await;
+    assert_eq!(crate::digest::run_once(&st, util_now()).await.unwrap(), 0, "nothing new yet");
+    let (token, cookie) = guest(&app, &project, "Bob", "bob@partner.example").await;
+    let h = [("cookie", cookie.as_str()), ("origin", ORIGIN)];
+    for body in ["First remark", "Second remark"] {
+        let (s, ..) = json(
+            &app,
+            Method::POST,
+            &format!("/api/r/{token}/comments"),
+            &h,
+            json!({"document": doc, "version": version, "kind": "note", "page": 0, "x": 1, "y": 1, "body": body}),
+        )
+        .await;
+        assert_eq!(s, StatusCode::CREATED);
+    }
+    let before = st.mailer.outbox().len();
+    assert_eq!(crate::digest::run_once(&st, util_now() + 1).await.unwrap(), 1);
+    let mails = st.mailer.outbox();
+    assert_eq!(mails[before].to, "chris@studio.example");
+    assert!(
+        mails[before].body.contains("Annual report") && mails[before].body.contains("2 new") && mails[before].body.contains("Second remark"),
+        "{}",
+        mails[before].body
+    );
+    assert_eq!(crate::digest::run_once(&st, util_now() + 2).await.unwrap(), 0, "sent once");
+}
+
+#[tokio::test]
+async fn closed_projects_are_deleted_after_the_retention_period() {
+    let st = state("retention");
+    let app = router(st.clone());
+    let (project, _, _, version) = project_with_version(&app).await;
+    let bundle = st.data_dir.join("versions").join(&version);
+    assert!(bundle.is_dir(), "{}", bundle.display());
+    let (s, _, p) = json(&app, Method::PATCH, &format!("/api/projects/{project}"), &admin(false), json!({"closed": true})).await;
+    assert_eq!((s, p["closed"].is_i64()), (StatusCode::OK, true), "{p}");
+    // Not yet: 89 days. Then: gone, rows and files.
+    assert_eq!(crate::retention::run_once(&st, util_now() + 89 * 86_400, 90).unwrap(), 0);
+    assert_eq!(crate::retention::run_once(&st, util_now() + 91 * 86_400, 90).unwrap(), 1);
+    let (s, ..) = json(&app, Method::GET, &format!("/api/projects/{project}"), &admin(false), Value::Null).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(!bundle.exists());
+    let left: i64 = st.db.with(|c| Ok(c.query_row("SELECT COUNT(*) FROM member WHERE project_id = ?1", [&project], |r| r.get(0))?)).unwrap();
+    assert_eq!(left, 0);
+}
+
+#[tokio::test]
+async fn healthz_reports_the_database_and_the_data_folder() {
+    let app = router(state("healthz"));
+    let (s, _, h) = json(&app, Method::GET, "/healthz", &[], Value::Null).await;
+    assert_eq!((s, h["ok"].as_bool(), h["db"].as_str()), (StatusCode::OK, Some(true), Some("ok")), "{h}");
+}
+
+#[tokio::test]
+async fn turnstile_guards_sign_in_and_guest_joins_when_configured() {
+    let verify: crate::security::Verify = std::sync::Arc::new(|token: String, _ip: String| Box::pin(async move { token == "pass" }));
+    let st = state("turnstile").with_turnstile("site-key-1", verify);
+    let app = router(st);
+    let (project, token, ..) = project_with_version(&app).await;
+    let (s, _, login) = json(&app, Method::GET, &format!("/api/r/{token}"), &[], Value::Null).await;
+    assert_eq!((s, login["turnstile"].as_str()), (StatusCode::UNAUTHORIZED, Some("site-key-1")), "{login}");
+    let (s, ..) = json(&app, Method::POST, "/api/auth/request", &[], json!({"email": "ann@acme.example", "link": token})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "no turnstile token");
+    let (s, ..) = json(&app, Method::POST, "/api/auth/request", &[], json!({"email": "ann@acme.example", "link": token, "turnstile": "fail"})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, ..) = json(&app, Method::POST, "/api/auth/request", &[], json!({"email": "ann@acme.example", "link": token, "turnstile": "pass"})).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _, l) = json(&app, Method::POST, &format!("/api/projects/{project}/share-links"), &admin(false), json!({"mode": "public"})).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let public = l["token"].as_str().unwrap();
+    let (s, ..) = json(&app, Method::POST, "/api/auth/guest", &[], json!({"link": public, "name": "Bob", "email": "bob@x.example"})).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, h, _) =
+        json(&app, Method::POST, "/api/auth/guest", &[], json!({"link": public, "name": "Bob", "email": "bob@x.example", "turnstile": "pass"})).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, _, page) = json(&app, Method::GET, &format!("/api/r/{public}"), &[("cookie", &cookie_of(&h))], Value::Null).await;
+    assert_eq!(page["turnstile"].as_str(), Some("site-key-1"));
+}

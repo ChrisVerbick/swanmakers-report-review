@@ -43,6 +43,8 @@ struct Draft {
     anchor: Option<Anchor>,
     rects: Vec<[f64; 4]>,
     pin: Option<(f64, f64)>,
+    /// A drawing's points.
+    path: Vec<[f64; 2]>,
 }
 
 async fn load(token: String, document: String, want: Option<String>) -> Result<Arc<Loaded>, Failure> {
@@ -86,6 +88,8 @@ pub fn Viewer() -> impl IntoView {
     let bump = move || tick.update(|n| *n = n.wrapping_add(1));
     // Bumped after a decision, so the round strip shows it.
     let reload = RwSignal::new(0u32);
+    // The pencil: strokes become draw comments.
+    let drawing = RwSignal::new(false);
 
     // The share page, then the version's bundle; the zoom fits the first page to the window.
     Effect::new(move |_| {
@@ -188,7 +192,19 @@ pub fn Viewer() -> impl IntoView {
         else {
             return;
         };
-        let payload = api::comment_body(&api::new_id(), &doc, &ver, d.kind, d.page, d.anchor.as_ref(), &d.rects, d.pin, &text, repl.as_deref());
+        let payload = api::comment_body(
+            &api::new_id(),
+            &doc,
+            &ver,
+            d.kind,
+            d.page,
+            d.anchor.as_ref(),
+            &d.rects,
+            d.pin,
+            &text,
+            repl.as_deref(),
+            (!d.path.is_empty()).then_some(d.path.as_slice()),
+        );
         write("POST", format!("{}/comments", api::api(&t)), payload, String::new());
         draft.set(None);
         body.set(String::new());
@@ -198,7 +214,7 @@ pub fn Viewer() -> impl IntoView {
     };
     let start_draft = move |kind: &'static str| {
         let Some(s) = sel.get_untracked() else { return };
-        let d = Draft { kind, page: s.page, anchor: s.anchor.clone(), rects: s.rects.clone(), pin: None };
+        let d = Draft { kind, page: s.page, anchor: s.anchor.clone(), rects: s.rects.clone(), pin: None, path: vec![] };
         if kind == "highlight" || kind == "strike" {
             submit_draft(d, String::new(), None);
         } else {
@@ -247,6 +263,7 @@ pub fn Viewer() -> impl IntoView {
                                 <span>{move || format!("{}%", (zoom.get() * 100.0).round())}</span>
                                 <button on:click=move |_| zoom.update(|z| *z = (*z + 0.1).min(3.0)) title="Zoom in">"+"</button>
                             </span>
+                            {move || can_comment().then(|| view! { <button class:active=move || drawing.get() title="Draw on the page" on:click=move |_| drawing.update(|d| *d = !*d)>"✎ Draw"</button> })}
                             {l.page.allow_download.then(|| view! { <a class="button" href=format!("{}/v/{}/document.pdf", api::api(&l.token), l.version.id) download="">"PDF"</a> })}
                         </header>
                         {l.round.as_ref().map(|r| {
@@ -263,7 +280,7 @@ pub fn Viewer() -> impl IntoView {
                         {(l.latest && l.round.as_ref().is_some_and(|r| r.locked.is_some())).then(|| view! { <p class="banner">"This round is locked: the version is read-only until the next round opens."</p> })}
                         {(l.page.me.is_none()).then(|| view! { <p class="banner">"You can read; to comment, " <a href=format!("/r/{}", l.token)>"join on the review page"</a>.</p> })}
                     };
-                    let pages = pages_view(l.clone(), zoom, comments, sel, draft, selected, can_comment, start_draft);
+                    let pages = pages_view(l.clone(), zoom, comments, sel, draft, selected, can_comment, start_draft, drawing);
                     view! {
                         {header}
                         <div class="layout">
@@ -279,7 +296,7 @@ pub fn Viewer() -> impl IntoView {
                                     };
                                     view! {
                                         <form class="composer card" on:submit=submit>
-                                            <h3>{match d.kind { "replace" => "Suggest a replacement", "pin" => "Pin a comment", _ => "Comment on the text" }}</h3>
+                                            <h3>{match d.kind { "replace" => "Suggest a replacement", "pin" => "Pin a comment", "draw" => "Say what the drawing means", _ => "Comment on the text" }}</h3>
                                             {d.anchor.as_ref().map(|a| view! { <blockquote>{a.exact.clone()}</blockquote> })}
                                             {(d.kind == "replace").then(|| view! { <label>"Replace with" <input required=true prop:value=move || replacement.get() on:input=move |ev| replacement.set(event_target_value(&ev)) /></label> })}
                                             <label>"Comment" <textarea rows=3 prop:value=move || body.get() on:input=move |ev| body.set(event_target_value(&ev))></textarea></label>
@@ -314,8 +331,11 @@ fn pages_view(
     selected: RwSignal<Option<String>>,
     can_comment: impl Fn() -> bool + Copy + Send + Sync + 'static,
     start_draft: impl Fn(&'static str) + Copy + Send + Sync + 'static,
+    drawing: RwSignal<bool>,
 ) -> impl IntoView {
     let base = format!("{}/v/{}", api::api(&l.token), l.version.id);
+    // The stroke being drawn: its page and points.
+    let stroke = RwSignal::new(None::<(usize, Vec<[f64; 2]>)>);
     let version = l.version.id.clone();
     l.manifest
         .pages
@@ -325,8 +345,47 @@ fn pages_view(
             let src = format!("{base}/{}", p.image);
             let lines = l.text.pages.iter().find(|t| t.index == index).map(|t| t.lines.clone()).unwrap_or_default();
             let version = version.clone();
+            // Where a pointer event is on this page, in page points.
+            let page_point = move |ev: &web_sys::MouseEvent| -> Option<[f64; 2]> {
+                let page_el = ev.target().and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok()).and_then(|e| e.closest(".page").ok().flatten())?;
+                let r = page_el.get_bounding_client_rect();
+                let z = zoom.get_untracked();
+                Some([(f64::from(ev.client_x()) - r.left()) / z, (f64::from(ev.client_y()) - r.top()) / z])
+            };
+            let pen_down = move |ev: leptos::ev::PointerEvent| {
+                if !drawing.get_untracked() || !can_comment() {
+                    return;
+                }
+                if let Some(p) = page_point(&ev) {
+                    ev.prevent_default();
+                    stroke.set(Some((index, vec![p])));
+                }
+            };
+            let pen_move = move |ev: leptos::ev::PointerEvent| {
+                if stroke.with_untracked(|s| s.as_ref().is_some_and(|(p, _)| *p == index))
+                    && let Some(p) = page_point(&ev)
+                {
+                    stroke.update(|s| {
+                        if let Some((_, pts)) = s
+                            && pts.last().is_none_or(|l| (l[0] - p[0]).abs() + (l[1] - p[1]).abs() > 0.5)
+                            && pts.len() < 2000
+                        {
+                            pts.push(p);
+                        }
+                    });
+                }
+            };
+            let pen_up = move |_ev: leptos::ev::PointerEvent| {
+                if let Some((page, pts)) = stroke.get_untracked().filter(|(p, _)| *p == index) {
+                    stroke.set(None);
+                    // The pencil stays on: the click that ends a stroke must not become a pin.
+                    if pts.len() >= 2 {
+                        draft.set(Some(Draft { kind: "draw", page, anchor: None, rects: vec![], pin: None, path: pts }));
+                    }
+                }
+            };
             let pin_here = move |ev: leptos::ev::MouseEvent| {
-                if !can_comment() {
+                if !can_comment() || drawing.get_untracked() {
                     return;
                 }
                 let on_text = ev.target().and_then(|t| wasm_bindgen::JsCast::dyn_into::<web_sys::Element>(t).ok()).and_then(|e| e.closest(".tl, .pin, .toolbar").ok().flatten()).is_some();
@@ -339,10 +398,10 @@ fn pages_view(
                 let r = page_el.get_bounding_client_rect();
                 let z = zoom.get_untracked();
                 let (x, y) = ((f64::from(ev.client_x()) - r.left()) / z, (f64::from(ev.client_y()) - r.top()) / z);
-                draft.set(Some(Draft { kind: "pin", page: index, anchor: None, rects: vec![], pin: Some((x, y)) }));
+                draft.set(Some(Draft { kind: "pin", page: index, anchor: None, rects: vec![], pin: Some((x, y)), path: vec![] }));
             };
             view! {
-                <section class="page" id=format!("page-{index}") style:width=move || px(w * zoom.get()) style:height=move || px(h * zoom.get()) on:click=pin_here>
+                <section class="page" class:drawing=move || drawing.get() id=format!("page-{index}") style:width=move || px(w * zoom.get()) style:height=move || px(h * zoom.get()) on:click=pin_here on:pointerdown=pen_down on:pointermove=pen_move on:pointerup=pen_up on:pointercancel=pen_up>
                     <img class="page-img" src=src alt=format!("Page {}", p.label) draggable="false" />
                     <div class="markers" aria-hidden="true">
                         {move || {
@@ -352,7 +411,10 @@ fn pages_view(
                             comments.get().into_iter().filter(|c| c.version == version && c.page as usize == index && c.in_reply_to.is_none()).map(|c| {
                                 let is_sel = sel_id.as_deref() == Some(c.id.as_str());
                                 let id = c.id.clone();
-                                if let (Some(x), Some(y)) = (c.x, c.y) {
+                                if let Some(path) = c.path.clone().filter(|p| p.len() >= 2) {
+                                    let points: String = path.iter().map(|p| format!("{:.1},{:.1} ", p[0] * z, p[1] * z)).collect();
+                                    view! { <svg class="marker-draw" class:selected=is_sel class:resolved=(c.status == "resolved") style:width=px(w * z) style:height=px(h * z) on:click=move |_| { selected.set(Some(id.clone())); dom::scroll_to(&format!("c-{}", id)); }><polyline points=points /></svg> }.into_any()
+                                } else if let (Some(x), Some(y)) = (c.x, c.y) {
                                     n += 1;
                                     view! { <button class="pin" class:selected=is_sel class:resolved=(c.status == "resolved") style:left=px(x * z) style:top=px(y * z) on:click=move |_| { selected.set(Some(id.clone())); dom::scroll_to(&format!("c-{}", id)); }>{n}</button> }.into_any()
                                 } else {
@@ -366,6 +428,14 @@ fn pages_view(
                             let z = zoom.get();
                             d.rects.iter().map(|r| view! { <div class="marker draft" style:left=px(r[0] * z) style:top=px(r[1] * z) style:width=px((r[2] - r[0]) * z) style:height=px((r[3] - r[1]) * z)></div> }).collect_view()
                         })}
+                        {move || {
+                            let z = zoom.get();
+                            let live = stroke.get().filter(|(p, _)| *p == index).map(|(_, pts)| pts).or_else(|| draft.get().filter(|d| d.page == index && !d.path.is_empty()).map(|d| d.path));
+                            live.map(|pts| {
+                                let points: String = pts.iter().map(|p| format!("{:.1},{:.1} ", p[0] * z, p[1] * z)).collect();
+                                view! { <svg class="marker-draw draft" style:width=px(w * z) style:height=px(h * z)><polyline points=points /></svg> }
+                            })
+                        }}
                     </div>
                     <div class="overlay">
                         {move || {

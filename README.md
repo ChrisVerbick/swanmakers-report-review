@@ -45,7 +45,7 @@ Owner side (the app), `Authorization: Bearer $ADMIN_TOKEN`:
 
 | Call | Does |
 |---|---|
-| `POST /api/projects {name, client?}` · `GET /api/projects` · `GET /api/projects/{id}` · `PATCH /api/projects/{id} {name?, client?, allowDownload?}` | projects; the detail has documents, versions, members, links and the last 200 audit events |
+| `POST /api/projects {name, client?}` · `GET /api/projects` · `GET /api/projects/{id}` · `PATCH /api/projects/{id} {name?, client?, allowDownload?, closed?}` | projects; the detail has documents, versions, members, links and the last 200 audit events; a closed project is deleted, rows and bundles, `RETENTION_DAYS` (90) after closing |
 | `POST /api/projects/{id}/members {email, name?, role: owner\|reviewer\|viewer}` · `DELETE …/members/{member}` | who may log in through invite links |
 | `POST /api/projects/{id}/share-links {mode: invite\|public, password?, expiresDays?}` → `{id, token, url}` · `DELETE /api/share-links/{id}` | share links; a public link's token is stored hashed (copy the URL when it is returned), an invite link's is kept so it can be mailed |
 | `POST /api/share-links/{id}/invite {emails?}` → `{sent}` | mails the invite link to the project's members (those listed in `emails`, or all) |
@@ -65,16 +65,28 @@ Reviewer side, under the share link's token:
 | `GET /api/r/{token}` | the share page: project, mode, `me`, documents and their versions, `rounds` (each with `documents`, `decisions` and `mine`) and the `current` round; 401 `{error: "login"}` when a login is needed |
 | `POST /api/r/{token}/decisions {round, document, value: approved\|changes, note?}` | a reviewer's decision on a document of an open round; a second one replaces the first |
 | `GET /api/r/{token}/v/{version}/manifest.json \| text.json \| pages/NNN.webp \| document.pdf` | the bundle (the PDF only while the project allows downloads) |
-| `GET /api/r/{token}/comments?document=&version=` · `POST /api/r/{token}/comments` · `PATCH …/comments/{id}` · `POST …/comments/{id}/replies` | comments: `kind` pin \| highlight \| strike \| replace \| note, with `page`, and for text kinds `story`, `cell?`/`footnote?`, `start`, `end`, `quote {exact, prefix, suffix}`, `rects`; `replacement` for replace; authors edit their own; members (not guests) resolve |
+| `GET /api/r/{token}/comments?document=&version=` · `POST /api/r/{token}/comments` · `PATCH …/comments/{id}` · `POST …/comments/{id}/replies` | comments: `kind` pin \| highlight \| strike \| replace \| note \| draw, with `page`, and for text kinds `story`, `cell?`/`footnote?`, `start`, `end`, `quote {exact, prefix, suffix}`, `rects`; `replacement` for replace; `path: [[x, y], …]` (page points, 2–2000) for draw; authors edit their own; members (not guests) resolve; an `@Name` in a body mails that member |
+| `GET /healthz` | `{ok, db, data, version}`, 503 when the database or the data folder is gone: point the uptime monitor here |
 | `GET /api/r/{token}/events?since=` (SSE, `Last-Event-ID` honoured) | the project's audit events, backlog then live |
 
 Roles: `owner`, `reviewer`, `viewer` (reads only), `guest` (public links; can't resolve).
 
 ## Mail the service sends
 
-Magic links on request, invites (`POST /api/share-links/{id}/invite`), and a reminder the day
+Magic links on request; invites (`POST /api/share-links/{id}/invite`); a reminder the day
 before a round is due to every member who hasn't decided on all its documents, checked every
-half hour and sent once per round. Without `SMTP_URL` the mail is logged instead.
+half hour and sent once per round; an @mention (`@Bob` or `@Bob Example` in a comment or reply)
+to that member at once; and a daily digest at `DIGEST_HOUR` UTC (7) to the project's owners
+(members with role `owner` and an address of their own) listing the comments since the last
+digest. Without `SMTP_URL` the mail is logged instead.
+
+## Configuration
+
+`ADMIN_TOKEN` (32+ characters), `DATA_DIR` (`data`), `WEB_DIR` (the built client), `BIND`
+(`127.0.0.1:8080`), `PUBLIC_ORIGIN`, `TRUST_PROXY` (behind Caddy), `SMTP_URL` and `MAIL_FROM`,
+`TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET` (both or neither: Cloudflare Turnstile on the sign-in
+and join forms; the widget's script and frame are allowed in the CSP only then), `DIGEST_HOUR`
+(7, UTC), `RETENTION_DAYS` (90). `deploy/.env.example` has them all.
 
 ## Deploy on a Hetzner VPS
 
@@ -97,9 +109,12 @@ Transactional Email (Paris) or SES eu-central-1 for mail.
    service listens only inside the Compose network; Litestream starts replicating.
 8. **Check**: `curl https://review.example.com/` says "DesignCraft Review"; `docker compose logs
    review` shows the listening line; create a project with the admin token and open a share link.
-9. **Bundles backup**: the `versions/` folder isn't in the SQLite file. Nightly, from cron:
-   `docker run --rm -v deploy_data:/data rclone/rclone sync /data/versions :s3:$BUCKET/review/versions
-   --s3-provider Other --s3-endpoint $ENDPOINT --s3-access-key-id … --s3-secret-access-key …`.
+9. **Backups**: Litestream streams the database; `deploy/backup.sh` takes a consistent nightly
+   copy of it (`VACUUM INTO`, 14 kept) and syncs the `versions/` bundles to the bucket. From the
+   server's cron, as the user in the `docker` group: `17 3 * * * cd /srv/designcraft-review/deploy && ./backup.sh >> /var/log/review-backup.log 2>&1`.
+10. **Monitoring**: an uptime check on `https://review.example.com/healthz` every few minutes
+    (Hetzner has none built in; any monitor that mails or pings a phone will do), and
+    `docker compose logs --since 24h review | grep -i warn` in the morning until it's boring.
 
 Updating: `git pull && docker compose up -d --build`. Watch the Caddy, Litestream and Debian
 security notices; `unattended-upgrades` keeps the OS current.
@@ -119,7 +134,28 @@ On a scratch VPS or your own machine with Docker:
 5. Note the time it took and what was missing. The replica lags production by about a second;
    the bundles by up to a day (the cron above).
 
-Last drill: not yet.
+Last drill: 2026-10-23, on the development machine, from a `VACUUM INTO` copy of a database
+and a copy of its `versions/` folder: the service started on the copy, migrated it from schema
+v2 to v3, `/healthz` answered, and the project came back with its 4 versions, 3 rounds and 2
+comments; under a minute. The production drill on Hetzner is still to do.
+
+## Ops checklist
+
+Each item once, with the date it was exercised.
+
+- [x] `cargo test` walks the API; `cargo clippy --all-targets` is clean — 2026-10-23
+- [x] Health check `GET /healthz` — 2026-10-23 (test and the restore drill)
+- [x] Due-date reminder, the day before, once — 2026-10-23 (test, log mailer)
+- [x] @mention mail and the daily digest — 2026-10-23 (tests)
+- [x] Retention: a closed project is deleted after `RETENTION_DAYS` — 2026-10-23 (test)
+- [x] Turnstile on sign-in and joins when configured — 2026-10-23 (test with an injected verifier;
+      the widget renders when real keys are set)
+- [x] Backup copy and restore drill — 2026-10-23, locally (above)
+- [ ] Deploy on Hetzner (steps 1–8), with DNS, SPF/DKIM/DMARC and `deploy/.env` — needs the accounts
+- [ ] `deploy/backup.sh` in cron on the server, and one restore drill from the bucket
+- [ ] Uptime monitor on `/healthz`
+- [ ] Turnstile keys from the Cloudflare dashboard (the free tier), if wanted
+- [ ] Data-processing agreements signed (docs/gdpr.md lists them)
 
 ## Security notes
 
@@ -145,15 +181,19 @@ Last drill: not yet.
 - Decisions from guests of a public link carry whatever name they typed, marked "(guest)" to
   reviewers and in the app; a round whose approvals must count as sign-off runs on an invite
   link. Reminders go to members with addresses, never to guests.
+- Cloudflare Turnstile, when its keys are set, sits on the sign-in and join forms in front of
+  the rate limits; the token is checked server-side with the client's IP. Without keys nothing
+  from Cloudflare is loaded.
 
 ## Data protection
 
 Processors: Hetzner Online GmbH (hosting and object storage, DE), the mail provider (Scaleway
-SAS, FR, or AWS eu-central-1), and nobody else when the Cloudflare proxy isn't used. Sign the
-data-processing agreements in each account. Personal data held: members' names, e-mail addresses
-and roles; comments and replies; audit events with IP addresses. Retention and deletion of whole
-projects is manual for now (`sqlite3` on the server); a retention job and a per-project erasure
-route are planned.
+SAS, FR, or AWS eu-central-1), and Cloudflare only when Turnstile is configured. Personal data
+held: members' names, e-mail addresses and roles; comments, replies and drawings; audit events
+with IP addresses. A project closed with `PATCH /api/projects/{id} {closed: true}` is deleted
+whole, rows and bundles, `RETENTION_DAYS` later; a member is removed with `DELETE
+…/members/{member}`. [docs/gdpr.md](docs/gdpr.md) has the Article 30 register, the sub-processor
+list and the agreements to sign.
 
 ## Licence
 

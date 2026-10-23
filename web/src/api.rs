@@ -54,6 +54,9 @@ pub struct SharePage {
     /// The latest round's id.
     #[serde(default)]
     pub current: Option<String>,
+    /// Turnstile's site key when the service guards sign-ins with it.
+    #[serde(default)]
+    pub turnstile: Option<String>,
 }
 
 /// A review round: which version of each document it shows, until when, and who decided what.
@@ -114,6 +117,8 @@ pub struct LoginNeeded {
     pub mode: String,
     #[serde(default)]
     pub project: String,
+    #[serde(default)]
+    pub turnstile: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -228,6 +233,9 @@ pub struct Comment {
     pub in_reply_to: Option<String>,
     #[serde(default)]
     pub round: Option<String>,
+    /// A drawing's points, page coordinates (pt).
+    #[serde(default)]
+    pub path: Option<Vec<[f64; 2]>>,
     pub author: Author,
 }
 
@@ -259,7 +267,11 @@ async fn answer<T: serde::de::DeserializeOwned>(resp: gloo_net::http::Response) 
     let status = resp.status();
     let body: Value = resp.json().await.unwrap_or(Value::Null);
     if status == 401 && body["error"] == "login" {
-        return Err(Failure::Login(serde_json::from_value(body).unwrap_or(LoginNeeded { mode: "invite".into(), project: String::new() })));
+        return Err(Failure::Login(serde_json::from_value(body).unwrap_or(LoginNeeded {
+            mode: "invite".into(),
+            project: String::new(),
+            turnstile: None,
+        })));
     }
     Err(Failure::Refused(status, body["error"].as_str().map_or_else(|| format!("the service answered {status}"), str::to_string)))
 }
@@ -371,6 +383,7 @@ pub fn comment_body(
     pin: Option<(f64, f64)>,
     body: &str,
     replacement: Option<&str>,
+    path: Option<&[[f64; 2]]>,
 ) -> Value {
     let mut v = json!({"id": id, "document": document, "version": version, "kind": kind, "page": page, "body": body});
     if let Some(a) = anchor {
@@ -381,6 +394,9 @@ pub fn comment_body(
         v["end"] = json!(a.end);
         v["quote"] = json!({"exact": a.exact, "prefix": a.prefix, "suffix": a.suffix});
         v["rects"] = json!(rects);
+    }
+    if let Some(p) = path {
+        v["path"] = json!(p);
     }
     if let Some((x, y)) = pin {
         v["x"] = json!(x);

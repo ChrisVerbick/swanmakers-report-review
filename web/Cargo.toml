@@ -15,7 +15,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 wasm-bindgen = "0.2.129"
 wasm-bindgen-futures = "0.4.79"
-web-sys = { version = "0.3.106", features = ["Window", "Document", "Element", "HtmlElement", "Node", "Text", "Selection", "Range", "DomRect", "DomRectList", "EventSource", "MessageEvent", "Storage", "CssStyleDeclaration", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "NodeList", "Event", "MouseEvent", "Location", "History", "EventTarget", "CharacterData", "ScrollToOptions", "ScrollBehavior", "Crypto", "HtmlImageElement"] }
+web-sys = { version = "0.3.106", features = ["Window", "Document", "Element", "HtmlElement", "Node", "Text", "Selection", "Range", "DomRect", "DomRectList", "EventSource", "MessageEvent", "Storage", "CssStyleDeclaration", "HtmlInputElement", "HtmlTextAreaElement", "HtmlSelectElement", "NodeList", "Event", "MouseEvent", "Location", "History", "EventTarget", "CharacterData", "ScrollToOptions", "ScrollBehavior", "Crypto", "HtmlImageElement", "PointerEvent", "HtmlScriptElement", "HtmlHeadElement"] }
 
 [lints]
 workspace = true

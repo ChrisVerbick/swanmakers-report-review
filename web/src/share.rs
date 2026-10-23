@@ -29,7 +29,7 @@ pub fn SharePage() -> impl IntoView {
             {move || match page.get() {
                 None => view! { <p class="muted">"Loading…"</p> }.into_any(),
                 Some(Ok(p)) => view! { <Documents token=token.get() page=p reload=reload /> }.into_any(),
-                Some(Err(Failure::Login(l))) => view! { <h1>{l.project}</h1><RequestLink token=token.get() /> }.into_any(),
+                Some(Err(Failure::Login(l))) => view! { <h1>{l.project}</h1><RequestLink token=token.get() turnstile=l.turnstile /> }.into_any(),
                 Some(Err(e)) => view! { <h1>"Review"</h1><p class="error">{e.to_string()}</p> }.into_any(),
             }}
         </main>
@@ -46,7 +46,8 @@ fn Documents(token: String, page: Page, reload: impl Fn() + Copy + Send + Sync +
         });
     };
     let me = page.me.clone();
-    let join = (page.mode == "public" && me.is_none()).then(|| view! { <Join token=t.clone() password=page.password reload=reload /> });
+    let join = (page.mode == "public" && me.is_none())
+        .then(|| view! { <Join token=t.clone() password=page.password turnstile=page.turnstile.clone() reload=reload /> });
     view! {
         <header class="title">
             <p class="kicker">{page.project.client.clone()}</p>
@@ -175,15 +176,21 @@ pub fn Decide(token: String, round: Round, document: String, reload: impl Fn() +
 
 /// Invite-only: ask for a sign-in link by mail.
 #[component]
-fn RequestLink(token: String) -> impl IntoView {
+fn RequestLink(token: String, turnstile: Option<String>) -> impl IntoView {
     let token = StoredValue::new(token);
     let email = RwSignal::new(String::new());
     let state = RwSignal::new(None::<Result<(), String>>);
+    let challenge = RwSignal::new(String::new());
+    let guarded = turnstile.is_some();
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         let (t, e) = (token.get_value(), email.get());
+        let mut body = json!({"email": e, "link": t});
+        if guarded {
+            body["turnstile"] = json!(challenge.get());
+        }
         spawn_local(async move {
-            let r = api::send::<Value>("POST", "/api/auth/request", &json!({"email": e, "link": t})).await.map(|_| ()).map_err(|e| e.to_string());
+            let r = api::send::<Value>("POST", "/api/auth/request", &body).await.map(|_| ()).map_err(|e| e.to_string());
             state.set(Some(r));
         });
     };
@@ -196,6 +203,7 @@ fn RequestLink(token: String) -> impl IntoView {
                     <p>"This review is by invitation. Enter the address you were invited with and we'll mail you a link."</p>
                     <form on:submit=submit>
                         <label>"E-mail" <input type="email" required=true autocomplete="email" prop:value=move || email.get() on:input=move |ev| email.set(event_target_value(&ev)) /></label>
+                        {turnstile.clone().map(|k| view! { <Turnstile site_key=k token=challenge /> })}
                         <button type="submit">"Send me a link"</button>
                         {other.and_then(|r| r.err()).map(|e| view! { <p class="error">{e}</p> })}
                     </form>
@@ -207,16 +215,21 @@ fn RequestLink(token: String) -> impl IntoView {
 
 /// Public link: a name to sign comments with, and the link's password when it has one.
 #[component]
-fn Join(token: String, password: bool, reload: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
+fn Join(token: String, password: bool, turnstile: Option<String>, reload: impl Fn() + Copy + Send + Sync + 'static) -> impl IntoView {
     let token = StoredValue::new(token);
     let name = RwSignal::new(String::new());
     let email = RwSignal::new(String::new());
     let pw = RwSignal::new(String::new());
     let error = RwSignal::new(None::<String>);
+    let challenge = RwSignal::new(String::new());
+    let guarded = turnstile.is_some();
     let submit = move |ev: leptos::ev::SubmitEvent| {
         ev.prevent_default();
         let t = token.get_value();
-        let body = json!({"link": t, "name": name.get(), "email": email.get(), "password": if password { Some(pw.get()) } else { None }});
+        let mut body = json!({"link": t, "name": name.get(), "email": email.get(), "password": if password { Some(pw.get()) } else { None }});
+        if guarded {
+            body["turnstile"] = json!(challenge.get());
+        }
         spawn_local(async move {
             match api::send::<Value>("POST", "/api/auth/guest", &body).await {
                 Ok(_) => reload(),
@@ -231,9 +244,23 @@ fn Join(token: String, password: bool, reload: impl Fn() + Copy + Send + Sync + 
                 <label>"Name" <input required=true autocomplete="name" prop:value=move || name.get() on:input=move |ev| name.set(event_target_value(&ev)) /></label>
                 <label>"E-mail" <input type="email" required=true autocomplete="email" prop:value=move || email.get() on:input=move |ev| email.set(event_target_value(&ev)) /></label>
                 {password.then(|| view! { <label>"Password" <input type="password" required=true prop:value=move || pw.get() on:input=move |ev| pw.set(event_target_value(&ev)) /></label> })}
+                {turnstile.clone().map(|k| view! { <Turnstile site_key=k token=challenge /> })}
                 <button type="submit">"Join"</button>
                 {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
             </form>
         </section>
     }
+}
+
+/// Cloudflare's Turnstile widget: its script renders into the div and hands a token to `token`.
+#[component]
+pub fn Turnstile(site_key: String, token: RwSignal<String>) -> impl IntoView {
+    let node = NodeRef::<leptos::html::Div>::new();
+    let key = StoredValue::new(site_key);
+    Effect::new(move |_| {
+        if let Some(el) = node.get() {
+            dom::turnstile_render(&el, &key.get_value(), move |t| token.set(t));
+        }
+    });
+    view! { <div class="turnstile" node_ref=node></div> }
 }

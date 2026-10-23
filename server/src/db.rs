@@ -67,6 +67,11 @@ CREATE TABLE decision (
 ALTER TABLE comment ADD COLUMN round_id TEXT REFERENCES round(id);
 ALTER TABLE share_link ADD COLUMN token TEXT;
 "#,
+    r#"
+ALTER TABLE project ADD COLUMN closed INTEGER;
+ALTER TABLE project ADD COLUMN digested INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE comment ADD COLUMN path TEXT;
+"#,
 ];
 
 impl Db {

@@ -126,6 +126,7 @@ pub fn verify_password(pw: &str, hash: &str) -> bool {
 pub struct RequestIn {
     email: String,
     link: String,
+    turnstile: Option<String>,
 }
 
 /// Mail a magic link to a member of the link's project. A stranger gets the same answer, and no
@@ -138,6 +139,7 @@ pub async fn request(State(st): State<AppState>, Extension(ClientIp(ip)): Extens
     if !valid_email(&email) {
         return Err(AppError::BadRequest("email: not an address".into()));
     }
+    st.check_turnstile(b.turnstile.as_deref(), &ip).await?;
     let link = link_by_token(&st, &b.link)?;
     let member: Option<String> = st.db.with(|c| {
         Ok(c.query_row("SELECT name FROM member WHERE project_id = ?1 AND email = ?2", params![link.project_id, email], |r| r.get(0)).optional()?)
@@ -244,6 +246,7 @@ pub struct GuestIn {
     name: String,
     email: String,
     password: Option<String>,
+    turnstile: Option<String>,
 }
 
 /// Join a public link as a guest: a name and address to sign comments with, and the link's
@@ -252,6 +255,7 @@ pub async fn guest(State(st): State<AppState>, Extension(ClientIp(ip)): Extensio
     if !st.limiter.allow(&format!("guest-ip:{ip}"), 20, 900) {
         return Err(AppError::TooMany);
     }
+    st.check_turnstile(g.turnstile.as_deref(), &ip).await?;
     let link = link_by_token(&st, &g.link)?;
     if link.mode != "public" {
         return Err(AppError::Forbidden("this review is by invitation: ask for a sign-in link".into()));

@@ -23,7 +23,9 @@ use crate::events::{self, record};
 use crate::security::ClientIp;
 use crate::util::{self, new_id, now};
 
-const KINDS: [&str; 5] = ["pin", "highlight", "strike", "replace", "note"];
+const KINDS: [&str; 6] = ["pin", "highlight", "strike", "replace", "note", "draw"];
+/// Points a drawing may have.
+const MAX_PATH: usize = 2_000;
 const MAX_BODY: usize = 10_000;
 
 struct Access {
@@ -36,16 +38,20 @@ fn access(st: &AppState, headers: &HeaderMap, token: &str) -> Result<Access> {
     let link = link_by_token(st, token)?;
     let me = session(st, headers)?.filter(|m| m.project_id == link.project_id && m.role != "removed");
     if link.mode == "invite" && me.is_none() {
-        return Err(AppError::Unauthorized(json!({"error": "login", "mode": "invite", "project": link.project_name})));
+        return Err(AppError::Unauthorized(
+            json!({"error": "login", "mode": "invite", "project": link.project_name, "turnstile": st.turnstile_key()}),
+        ));
     }
     Ok(Access { link, me })
 }
 
-fn commenter(a: &Access) -> Result<&Me> {
+fn commenter<'a>(st: &AppState, a: &'a Access) -> Result<&'a Me> {
     match &a.me {
         Some(m) if m.role == "viewer" => Err(AppError::Forbidden("viewers can't comment".into())),
         Some(m) => Ok(m),
-        None => Err(AppError::Unauthorized(json!({"error": "login", "mode": a.link.mode, "project": a.link.project_name}))),
+        None => Err(AppError::Unauthorized(
+            json!({"error": "login", "mode": a.link.mode, "project": a.link.project_name, "turnstile": st.turnstile_key()}),
+        )),
     }
 }
 
@@ -53,7 +59,7 @@ fn commenter(a: &Access) -> Result<&Me> {
 pub fn comment_json(c: &Connection, id: &str) -> Result<Value> {
     c.query_row(
         "SELECT c.id, c.document_id, c.version_id, c.kind, c.page, c.story, c.cell, c.footnote, c.start, c.end, c.quote_exact, c.quote_prefix, c.quote_suffix, \
-         c.rects, c.x, c.y, c.body, c.replacement, c.status, c.created, c.modified, c.in_reply_to, m.id, m.name, m.email, m.role, c.round_id \
+         c.rects, c.x, c.y, c.body, c.replacement, c.status, c.created, c.modified, c.in_reply_to, m.id, m.name, m.email, m.role, c.round_id, c.path \
          FROM comment c JOIN member m ON m.id = c.author_id WHERE c.id = ?1",
         [id],
         |r| {
@@ -67,6 +73,7 @@ pub fn comment_json(c: &Connection, id: &str) -> Result<Value> {
                 "rects": json_col(13)?, "x": r.get::<_, Option<f64>>(14)?, "y": r.get::<_, Option<f64>>(15)?,
                 "body": r.get::<_, String>(16)?, "replacement": r.get::<_, Option<String>>(17)?, "status": r.get::<_, String>(18)?,
                 "created": r.get::<_, i64>(19)?, "modified": r.get::<_, i64>(20)?, "inReplyTo": r.get::<_, Option<String>>(21)?, "round": r.get::<_, Option<String>>(26)?,
+                "path": r.get::<_, Option<String>>(27)?.and_then(|p| serde_json::from_str::<Value>(&p).ok()),
                 "author": {"id": r.get::<_, String>(22)?, "name": r.get::<_, String>(23)?, "email": r.get::<_, String>(24)?, "role": r.get::<_, String>(25)?}
             }))
         },
@@ -93,7 +100,7 @@ pub async fn share_page(State(st): State<AppState>, Path(token): Path<String>, h
         }
         let rounds = crate::rounds::rounds_json(c, &a.link.project_id, a.me.as_ref().map(|m| m.id.as_str()))?;
         let current = crate::rounds::current(c, &a.link.project_id)?;
-        Ok(json!({"project": {"id": a.link.project_id, "name": name, "client": client}, "mode": a.link.mode, "allowDownload": a.link.allow_download, "password": a.link.password_hash.is_some(), "me": a.me, "documents": documents, "rounds": rounds, "current": current}))
+        Ok(json!({"project": {"id": a.link.project_id, "name": name, "client": client}, "mode": a.link.mode, "allowDownload": a.link.allow_download, "password": a.link.password_hash.is_some(), "me": a.me, "documents": documents, "rounds": rounds, "current": current, "turnstile": st.turnstile_key()}))
     })?;
     Ok(Json(v))
 }
@@ -186,6 +193,8 @@ pub struct CommentIn {
     #[serde(default)]
     body: String,
     replacement: Option<String>,
+    /// A drawing: points in page coordinates (pt from the top-left corner).
+    path: Option<Vec<[f64; 2]>>,
 }
 
 pub async fn create_comment(
@@ -196,10 +205,10 @@ pub async fn create_comment(
     Json(c): Json<CommentIn>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let a = access(&st, &headers, &token)?;
-    let me = commenter(&a)?;
+    let me = commenter(&st, &a)?;
     let bad = |m: &str| AppError::BadRequest(m.into());
     if !KINDS.contains(&c.kind.as_str()) {
-        return Err(bad("kind: pin, highlight, strike, replace or note"));
+        return Err(bad("kind: pin, highlight, strike, replace, note or draw"));
     }
     let body = util::text(&c.body, MAX_BODY, "body")?;
     let replacement = c.replacement.as_deref().map(|r| util::text(r, MAX_BODY, "replacement")).transpose()?;
@@ -219,6 +228,13 @@ pub async fn create_comment(
     if c.kind == "pin" && (c.x.is_none_or(|x| !x.is_finite()) || c.y.is_none_or(|y| !y.is_finite())) {
         return Err(bad("x and y: where the pin goes"));
     }
+    let path = match (&c.kind[..], &c.path) {
+        ("draw", Some(p)) if p.len() >= 2 && p.len() <= MAX_PATH && p.iter().all(|[x, y]| x.is_finite() && y.is_finite()) => {
+            Some(Value::Array(p.iter().map(|[x, y]| json!([x, y])).collect()).to_string())
+        }
+        ("draw", _) => return Err(bad("path: 2 to 2000 points [[x, y], …]")),
+        _ => None,
+    };
     if let Some(cell) = &c.cell
         && !(cell.is_object() && cell["table"].is_u64() && cell["row"].is_u64() && cell["col"].is_u64())
     {
@@ -243,18 +259,19 @@ pub async fn create_comment(
         let round = crate::rounds::round_for_comment(conn, &c.document, &c.version)?;
         let t = now();
         conn.execute(
-            "INSERT INTO comment (id, project_id, document_id, version_id, author_id, kind, page, story, cell, footnote, start, end, quote_exact, quote_prefix, quote_suffix, rects, x, y, body, replacement, status, created, modified, round_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 'open', ?21, ?21, ?22)",
+            "INSERT INTO comment (id, project_id, document_id, version_id, author_id, kind, page, story, cell, footnote, start, end, quote_exact, quote_prefix, quote_suffix, rects, x, y, body, replacement, status, created, modified, round_id, path) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, 'open', ?21, ?21, ?22, ?23)",
             params![
                 id, a.link.project_id, c.document, c.version, me.id, c.kind, c.page, c.story,
                 c.cell.as_ref().map(Value::to_string), c.footnote, c.start, c.end,
                 anchored.then_some(q.exact.as_str()), anchored.then_some(q.prefix.as_str()), anchored.then_some(q.suffix.as_str()),
-                c.rects.as_ref().map(Value::to_string), c.x, c.y, body, replacement, t, round
+                c.rects.as_ref().map(Value::to_string), c.x, c.y, body, replacement, t, round, path
             ],
         )?;
         record(conn, &st.bus, &a.link.project_id, "comment.created", &me.id, &ip, json!({"comment": id, "document": c.document, "version": c.version, "kind": c.kind, "page": c.page}))?;
         comment_json(conn, &id)
     })?;
+    crate::digest::mention(&st, &a.link.project_id, &id).await;
     Ok((StatusCode::CREATED, Json(v)))
 }
 
@@ -272,7 +289,7 @@ pub async fn reply(
     Json(r): Json<ReplyIn>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let a = access(&st, &headers, &token)?;
-    let me = commenter(&a)?;
+    let me = commenter(&st, &a)?;
     let body = util::text(&r.body, MAX_BODY, "body")?;
     if body.is_empty() {
         return Err(AppError::BadRequest("body: say something".into()));
@@ -296,6 +313,7 @@ pub async fn reply(
         record(c, &st.bus, &a.link.project_id, "comment.replied", &me.id, &ip, json!({"comment": root, "reply": id}))?;
         comment_json(c, &id)
     })?;
+    crate::digest::mention(&st, &a.link.project_id, &id).await;
     Ok((StatusCode::CREATED, Json(v)))
 }
 
@@ -315,7 +333,7 @@ pub async fn patch_comment(
     Json(p): Json<CommentPatch>,
 ) -> Result<Json<Value>> {
     let a = access(&st, &headers, &token)?;
-    let me = commenter(&a)?;
+    let me = commenter(&st, &a)?;
     let v = st.db.tx(|c| {
         let row: Option<(String, String)> = c
             .query_row("SELECT author_id, status FROM comment WHERE id = ?1 AND project_id = ?2", params![id, a.link.project_id], |r| {
@@ -382,7 +400,7 @@ pub async fn decide(
     Json(d): Json<DecisionIn>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let a = access(&st, &headers, &token)?;
-    let me = commenter(&a)?;
+    let me = commenter(&st, &a)?;
     let note = util::text(&d.note, 2_000, "note")?;
     let v = st.db.tx(|c| {
         crate::rounds::decide(

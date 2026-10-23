@@ -2,7 +2,7 @@
 //! image, event listeners, the event stream.
 
 use wasm_bindgen::JsCast;
-use wasm_bindgen::prelude::Closure;
+use wasm_bindgen::prelude::{Closure, JsValue};
 use web_sys::{Element, Event, EventSource, MessageEvent, Node};
 
 pub fn document() -> Option<web_sys::Document> {
@@ -150,4 +150,48 @@ pub fn inner_width() -> f64 {
 /// `created` seconds as the browser shows dates.
 pub fn date(secs: i64) -> String {
     js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(secs as f64 * 1000.0)).to_locale_string("default", &wasm_bindgen::JsValue::UNDEFINED).into()
+}
+
+/// Render Turnstile into `el` (loading Cloudflare's script once), calling `on_token` with the
+/// token when the challenge passes.
+pub fn turnstile_render(el: &web_sys::Element, site_key: &str, on_token: impl Fn(String) + Clone + 'static) {
+    let Some(window) = web_sys::window() else { return };
+    let el = el.clone();
+    let key = site_key.to_string();
+    let render = move || {
+        let Some(window) = web_sys::window() else { return };
+        let Ok(ts) = js_sys::Reflect::get(&window, &"turnstile".into()) else { return };
+        let Ok(render) = js_sys::Reflect::get(&ts, &"render".into()) else { return };
+        let Some(render) = render.dyn_ref::<js_sys::Function>() else { return };
+        let on_token = on_token.clone();
+        let cb = Closure::<dyn Fn(JsValue)>::new(move |t: JsValue| on_token(t.as_string().unwrap_or_default()));
+        let opts = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&opts, &"sitekey".into(), &key.as_str().into());
+        let _ = js_sys::Reflect::set(&opts, &"callback".into(), cb.as_ref());
+        let _ = render.call2(&ts, &el, &opts);
+        // The widget keeps calling back for as long as the page lives.
+        cb.forget();
+    };
+    if js_sys::Reflect::get(&window, &"turnstile".into()).ok().is_some_and(|t| !t.is_undefined()) {
+        render();
+        return;
+    }
+    let Some(doc) = window.document() else { return };
+    let already = doc.query_selector("script[data-turnstile]").ok().flatten();
+    let script = match already {
+        Some(s) => s,
+        None => {
+            let Ok(s) = doc.create_element("script") else { return };
+            let _ = s.set_attribute("src", "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit");
+            let _ = s.set_attribute("async", "");
+            let _ = s.set_attribute("data-turnstile", "1");
+            if let Some(head) = doc.head() {
+                let _ = head.append_child(&s);
+            }
+            s
+        }
+    };
+    let onload = Closure::<dyn FnMut(Event)>::new(move |_| render());
+    let _ = script.add_event_listener_with_callback("load", onload.as_ref().unchecked_ref());
+    onload.forget();
 }

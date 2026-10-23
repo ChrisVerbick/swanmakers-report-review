@@ -28,8 +28,8 @@ fn require_admin(st: &AppState, headers: &HeaderMap) -> Result<()> {
 }
 
 fn project_json(c: &Connection, id: &str) -> Result<Value> {
-    c.query_row("SELECT id, name, client, allow_download, created FROM project WHERE id = ?1", [id], |r| {
-        Ok(json!({"id": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?, "client": r.get::<_, String>(2)?, "allowDownload": r.get::<_, i64>(3)? != 0, "created": r.get::<_, i64>(4)?}))
+    c.query_row("SELECT id, name, client, allow_download, created, closed FROM project WHERE id = ?1", [id], |r| {
+        Ok(json!({"id": r.get::<_, String>(0)?, "name": r.get::<_, String>(1)?, "client": r.get::<_, String>(2)?, "allowDownload": r.get::<_, i64>(3)? != 0, "created": r.get::<_, i64>(4)?, "closed": r.get::<_, Option<i64>>(5)?}))
     })
     .optional()?
     .ok_or_else(|| AppError::NotFound("no such project".into()))
@@ -126,6 +126,8 @@ pub struct ProjectPatch {
     name: Option<String>,
     client: Option<String>,
     allow_download: Option<bool>,
+    /// Closed projects are deleted after the retention period (`RETENTION_DAYS`, 90 by default).
+    closed: Option<bool>,
 }
 
 pub async fn patch_project(
@@ -151,7 +153,18 @@ pub async fn patch_project(
         if let Some(d) = p.allow_download {
             c.execute("UPDATE project SET allow_download = ?2 WHERE id = ?1", params![id, i64::from(d)])?;
         }
-        record(c, &st.bus, &id, "project.updated", ACTOR, &ip, json!({"name": p.name, "client": p.client, "allowDownload": p.allow_download}))?;
+        if let Some(closed) = p.closed {
+            c.execute("UPDATE project SET closed = ?2 WHERE id = ?1", params![id, closed.then(now)])?;
+        }
+        record(
+            c,
+            &st.bus,
+            &id,
+            "project.updated",
+            ACTOR,
+            &ip,
+            json!({"name": p.name, "client": p.client, "allowDownload": p.allow_download, "closed": p.closed}),
+        )?;
         project_json(c, &id)
     })?;
     Ok(Json(v))

@@ -75,6 +75,16 @@ pub fn text(s: &str, max_chars: usize, what: &str) -> Result<String> {
     Ok(s.to_string())
 }
 
+/// Seconds from `now` to the next `hour`:00 UTC (at least one second).
+pub fn secs_until_hour(now: i64, hour: i64) -> u64 {
+    let day = now.div_euclid(86_400) * 86_400;
+    let mut at = day + hour.clamp(0, 23) * 3600;
+    if at <= now {
+        at += 86_400;
+    }
+    (at - now).max(1) as u64
+}
+
 /// `secs` as a calendar date, `YYYY-MM-DD` (UTC), for mail.
 pub fn date(secs: i64) -> String {
     let z = secs.div_euclid(86_400) + 719_468;
@@ -106,6 +116,13 @@ pub fn html_escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_next_hour_is_today_or_tomorrow() {
+        assert_eq!(super::secs_until_hour(0, 7), 7 * 3600);
+        assert_eq!(super::secs_until_hour(8 * 3600, 7), 23 * 3600);
+        assert_eq!(super::secs_until_hour(7 * 3600, 7), 86_400);
+    }
+
     #[test]
     fn dates_come_out_as_the_calendar_has_them() {
         assert_eq!(super::date(0), "1970-01-01");

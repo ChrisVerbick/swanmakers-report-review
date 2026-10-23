@@ -109,3 +109,12 @@ main.narrow { max-width: 42rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
 .decide .small { padding: .15rem .5rem; font-size: .85rem; }
 .decide input { width: 14rem; padding: .15rem .4rem; }
 .banner.round { background: var(--paper); border-bottom: 1px solid var(--line); color: var(--ink); display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.bar button.active { background: var(--accent); color: var(--accent-ink); }
+.page.drawing { cursor: crosshair; touch-action: none; }
+.page.drawing .overlay { pointer-events: none; }
+.marker-draw { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.marker-draw polyline { fill: none; stroke: var(--strike); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; pointer-events: stroke; cursor: pointer; }
+.marker-draw.draft polyline { stroke: var(--accent); }
+.marker-draw.selected polyline { stroke-width: 4; }
+.marker-draw.resolved { opacity: .35; }
+.turnstile { margin: .6rem 0; min-height: 65px; }
