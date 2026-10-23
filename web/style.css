@@ -6,6 +6,7 @@
   --line: #d9d9d5;
   --accent: #b2412f;
   --accent-ink: #ffffff;
+  --danger: #a3261a;
   --highlight: rgba(255, 214, 0, 0.45);
   --strike: rgba(214, 48, 24, 0.5);
   --select: rgba(0, 110, 230, 0.35);
@@ -20,6 +21,7 @@
     --line: #3a3b3f;
     --accent: #e0694f;
     --accent-ink: #17181a;
+    --danger: #ff8a76;
     --highlight: rgba(255, 214, 0, 0.35);
     --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.35);
   }
@@ -33,14 +35,17 @@ h1 { font-size: 1.6rem; }
 h2 { font-size: 1.15rem; margin-top: 1.5rem; }
 h3 { font-size: 1rem; }
 button, .button, input, textarea, select { font: inherit; }
-button, .button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px; padding: .45rem .9rem; cursor: pointer; text-decoration: none; display: inline-block; }
-button.quiet { background: transparent; color: var(--accent); padding: .3rem .5rem; }
-button.link { background: none; color: var(--accent); padding: 0; text-decoration: underline; }
+/* Buttons are quiet by default; the one main action of a view is `.primary`. */
+button, .button { background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: .45rem .9rem; cursor: pointer; text-decoration: none; display: inline-block; }
+button:hover, .button:hover { border-color: var(--muted); }
+button.primary, .button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+button.quiet { background: transparent; color: var(--accent); border: 0; padding: .3rem .5rem; }
+button.link { background: none; color: var(--accent); border: 0; padding: 0; text-decoration: underline; }
 input, textarea, select { width: 100%; padding: .5rem .6rem; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); }
 label { display: block; margin: .6rem 0; font-weight: 600; }
 label input, label textarea { margin-top: .25rem; font-weight: 400; }
 .muted { color: var(--muted); }
-.error { color: var(--accent); }
+.error { color: var(--danger); }
 .pad { padding: 1rem; }
 .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
 .card { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.2rem; margin: 1rem 0; }
@@ -109,7 +114,7 @@ main.narrow { max-width: 42rem; margin: 0 auto; padding: 2rem 1rem 4rem; }
 .decide .small { padding: .15rem .5rem; font-size: .85rem; }
 .decide input { width: 14rem; padding: .15rem .4rem; }
 .banner.round { background: var(--paper); border-bottom: 1px solid var(--line); color: var(--ink); display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
-.bar button.active { background: var(--accent); color: var(--accent-ink); }
+.bar button.active { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
 .page.drawing { cursor: crosshair; touch-action: none; }
 .page.drawing .overlay { pointer-events: none; }
 .marker-draw { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }

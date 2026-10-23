@@ -301,7 +301,7 @@ pub fn Viewer() -> impl IntoView {
                                             {(d.kind == "replace").then(|| view! { <label>"Replace with" <input required=true prop:value=move || replacement.get() on:input=move |ev| replacement.set(event_target_value(&ev)) /></label> })}
                                             <label>"Comment" <textarea rows=3 prop:value=move || body.get() on:input=move |ev| body.set(event_target_value(&ev))></textarea></label>
                                             <div class="row">
-                                                <button type="submit">"Send"</button>
+                                                <button type="submit" class="primary">"Send"</button>
                                                 <button type="button" class="quiet" on:click=move |_| { draft.set(None); body.set(String::new()); replacement.set(String::new()); }>"Cancel"</button>
                                             </div>
                                         </form>

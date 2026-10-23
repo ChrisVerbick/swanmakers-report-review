@@ -204,7 +204,7 @@ fn RequestLink(token: String, turnstile: Option<String>) -> impl IntoView {
                     <form on:submit=submit>
                         <label>"E-mail" <input type="email" required=true autocomplete="email" prop:value=move || email.get() on:input=move |ev| email.set(event_target_value(&ev)) /></label>
                         {turnstile.clone().map(|k| view! { <Turnstile site_key=k token=challenge /> })}
-                        <button type="submit">"Send me a link"</button>
+                        <button type="submit" class="primary">"Send me a link"</button>
                         {other.and_then(|r| r.err()).map(|e| view! { <p class="error">{e}</p> })}
                     </form>
                 }.into_any(),
@@ -245,7 +245,7 @@ fn Join(token: String, password: bool, turnstile: Option<String>, reload: impl F
                 <label>"E-mail" <input type="email" required=true autocomplete="email" prop:value=move || email.get() on:input=move |ev| email.set(event_target_value(&ev)) /></label>
                 {password.then(|| view! { <label>"Password" <input type="password" required=true prop:value=move || pw.get() on:input=move |ev| pw.set(event_target_value(&ev)) /></label> })}
                 {turnstile.clone().map(|k| view! { <Turnstile site_key=k token=challenge /> })}
-                <button type="submit">"Join"</button>
+                <button type="submit" class="primary">"Join"</button>
                 {move || error.get().map(|e| view! { <p class="error">{e}</p> })}
             </form>
         </section>
