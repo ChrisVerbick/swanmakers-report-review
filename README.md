@@ -88,7 +88,43 @@ digest. Without `SMTP_URL` the mail is logged instead.
 and join forms; the widget's script and frame are allowed in the CSP only then), `DIGEST_HOUR`
 (7, UTC), `RETENTION_DAYS` (90). `deploy/.env.example` has them all.
 
-## Deploy on a Hetzner VPS
+## Deploy with Coolify
+
+The stack for Coolify is `deploy/coolify/docker-compose.yaml`: the service and Litestream behind
+Coolify's own proxy (TLS and routing), the image pulled from GitHub's registry where
+`.github/workflows/image.yml` builds it on every push to `main` (a 2-vCPU VPS never compiles
+Rust). Coolify fills in the domain and a 64-character owner token.
+
+1. **Image**: push this repository to GitHub; the `image` workflow publishes
+   `ghcr.io/<owner>/designcraft-review:latest`. Make the package public (Packages › the image ›
+   Package settings › Change visibility), or run `docker login ghcr.io` on the server with a
+   token that has `read:packages`, so Coolify can pull it.
+2. **Resource**: in Coolify, New Resource › the GitHub repository (through the Coolify GitHub
+   app for a private one) › Build pack **Docker Compose**; Base Directory `/`, Docker Compose
+   Location `/deploy/coolify/docker-compose.yaml`; Load Compose File.
+3. **Domain**: on the `review` service, set the domain (`https://review.example.com`; its DNS A
+   record points at the server). Coolify routes it to port 8080 and derives `PUBLIC_ORIGIN`
+   from it.
+4. **Environment variables**: `GHCR_OWNER` (your GitHub user or organisation, lowercase),
+   `SMTP_URL` and `MAIL_FROM` (Scaleway TEM or SES eu-central-1, with SPF, DKIM and DMARC set on
+   the domain), `LITESTREAM_BUCKET`, `LITESTREAM_ENDPOINT`, `LITESTREAM_REGION`,
+   `LITESTREAM_ACCESS_KEY_ID` and `LITESTREAM_SECRET_ACCESS_KEY` (a Hetzner Object Storage
+   bucket in the same location), and if wanted `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`,
+   `DIGEST_HOUR`, `RETENTION_DAYS`. `SERVICE_PASSWORD_64_ADMINTOKEN` is generated: copy it into
+   the app (Review panel › Review service › token, or `prefs.set {reviewToken}`), together with
+   the domain as the server.
+5. **Deploy**, then `curl https://review.example.com/healthz` says `"ok":true`; the Logs tab
+   shows the listening line and, until `SMTP_URL` is set, every mail the service would send.
+6. **Updates**: a push to `main` builds a new image; Redeploy in Coolify pulls it (or paste the
+   resource's deploy webhook into the workflow as a last step). Database migrations run on start.
+7. **Backups**: Litestream replicates continuously. For the nightly copy and the bundles,
+   `deploy/backup.sh` works on the server with the volume Coolify created
+   (`docker volume ls | grep review-data` gives its prefixed name: set `DATA_VOLUME` to it).
+8. **Coolify itself**: its dashboard is a root-equivalent control plane. Keep it off the public
+   internet (Cloud Firewall to your own IP, or behind Tailscale), turn on two-factor
+   authentication, and let it auto-update.
+
+## Deploy on a Hetzner VPS without Coolify
 
 Everything stays in the EU: Hetzner Falkenstein for the server and the object storage, Scaleway
 Transactional Email (Paris) or SES eu-central-1 for mail.
@@ -151,7 +187,7 @@ Each item once, with the date it was exercised.
 - [x] Turnstile on sign-in and joins when configured — 2026-10-23 (test with an injected verifier;
       the widget renders when real keys are set)
 - [x] Backup copy and restore drill — 2026-10-23, locally (above)
-- [ ] Deploy on Hetzner (steps 1–8), with DNS, SPF/DKIM/DMARC and `deploy/.env` — needs the accounts
+- [ ] Deploy with Coolify (its section above) or plain Compose (steps 1–8), with DNS and SPF/DKIM/DMARC — needs the accounts
 - [ ] `deploy/backup.sh` in cron on the server, and one restore drill from the bucket
 - [ ] Uptime monitor on `/healthz`
 - [ ] Turnstile keys from the Cloudflare dashboard (the free tier), if wanted

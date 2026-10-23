@@ -1,0 +1,80 @@
+# DesignCraft Review on Coolify: the service and Litestream, behind Coolify's own proxy (which
+# does TLS and routing, so there is no Caddy here). Coolify fills the SERVICE_* values in: the
+# domain it routes to port 8080 and a 64-character owner token. Everything else comes from the
+# resource's environment variables (see README, "Deploy with Coolify").
+#
+# The image is built by GitHub Actions (.github/workflows/image.yml) and pulled from GHCR, so
+# the small VPS never compiles Rust. To build on the server instead, replace `image:` with
+# `build: ../..` and give the server 4 GB of swap.
+services:
+  review:
+    image: ghcr.io/${GHCR_OWNER:-chrisverbick}/designcraft-review:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    environment:
+      SERVICE_FQDN_REVIEW_8080: /
+      PUBLIC_ORIGIN: ${SERVICE_URL_REVIEW_8080}
+      ADMIN_TOKEN: ${SERVICE_PASSWORD_64_ADMINTOKEN}
+      BIND: 0.0.0.0:8080
+      DATA_DIR: /data
+      WEB_DIR: /web
+      TRUST_PROXY: "1"
+      RUST_LOG: ${RUST_LOG:-info}
+      SMTP_URL: ${SMTP_URL:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+      DIGEST_HOUR: ${DIGEST_HOUR:-7}
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+    volumes:
+      - review-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"ok\":true' <&3"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  litestream:
+    image: litestream/litestream:0.5
+    restart: unless-stopped
+    command: replicate -config /etc/litestream.yml
+    environment:
+      LITESTREAM_BUCKET: ${LITESTREAM_BUCKET}
+      LITESTREAM_ENDPOINT: ${LITESTREAM_ENDPOINT}
+      LITESTREAM_REGION: ${LITESTREAM_REGION:-fsn1}
+      LITESTREAM_ACCESS_KEY_ID: ${LITESTREAM_ACCESS_KEY_ID}
+      LITESTREAM_SECRET_ACCESS_KEY: ${LITESTREAM_SECRET_ACCESS_KEY}
+    volumes:
+      - review-data:/data
+    configs:
+      - source: litestream
+        target: /etc/litestream.yml
+    depends_on:
+      review:
+        condition: service_healthy
+
+volumes:
+  review-data:
+
+# Litestream's configuration, inline so the stack needs no file from the repository at run time.
+configs:
+  litestream:
+    content: |
+      dbs:
+        - path: /data/db.sqlite
+          replicas:
+            - type: s3
+              bucket: ${LITESTREAM_BUCKET}
+              path: review/db
+              endpoint: ${LITESTREAM_ENDPOINT}
+              region: ${LITESTREAM_REGION:-fsn1}
+              access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+              secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+              force-path-style: true
+              retention: 720h
+              sync-interval: 1s
