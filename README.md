@@ -96,7 +96,7 @@ Coolify's own proxy (TLS and routing), the image pulled from GitHub's registry w
 Rust). Coolify fills in the domain and a 64-character owner token.
 
 1. **Image**: push this repository to GitHub; the `image` workflow publishes
-   `ghcr.io/<owner>/designcraft-review:latest`. Make the package public (Packages › the image ›
+   `ghcr.io/<owner>/swanmakers-report-review:latest`. Make the package public (Packages › the image ›
    Package settings › Change visibility), or run `docker login ghcr.io` on the server with a
    token that has `read:packages`, so Coolify can pull it.
 2. **Resource**: in Coolify, New Resource › the GitHub repository (through the Coolify GitHub
@@ -147,7 +147,7 @@ Transactional Email (Paris) or SES eu-central-1 for mail.
    review` shows the listening line; create a project with the admin token and open a share link.
 9. **Backups**: Litestream streams the database; `deploy/backup.sh` takes a consistent nightly
    copy of it (`VACUUM INTO`, 14 kept) and syncs the `versions/` bundles to the bucket. From the
-   server's cron, as the user in the `docker` group: `17 3 * * * cd /srv/designcraft-review/deploy && ./backup.sh >> /var/log/review-backup.log 2>&1`.
+   server's cron, as the user in the `docker` group: `17 3 * * * cd /srv/swanmakers-report-review/deploy && ./backup.sh >> /var/log/review-backup.log 2>&1`.
 10. **Monitoring**: an uptime check on `https://review.example.com/healthz` every few minutes
     (Hetzner has none built in; any monitor that mails or pings a phone will do), and
     `docker compose logs --since 24h review | grep -i warn` in the morning until it's boring.

@@ -8,7 +8,7 @@
 # `build: ../..` and give the server 4 GB of swap.
 services:
   review:
-    image: ghcr.io/${GHCR_OWNER:-chrisverbick}/designcraft-review:${IMAGE_TAG:-latest}
+    image: ghcr.io/${GHCR_OWNER:-chrisverbick}/swanmakers-report-review:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       SERVICE_FQDN_REVIEW_8080: /
