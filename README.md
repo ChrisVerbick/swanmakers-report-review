@@ -111,8 +111,9 @@ Rust). Coolify fills in the domain and a 64-character owner token.
 4. **Environment variables**: `GHCR_OWNER` (your GitHub user or organisation, lowercase),
    `SMTP_URL` and `MAIL_FROM` (Scaleway TEM or SES eu-central-1, with SPF, DKIM and DMARC set on
    the domain), `LITESTREAM_BUCKET`, `LITESTREAM_ENDPOINT`, `LITESTREAM_REGION`,
-   `LITESTREAM_ACCESS_KEY_ID` and `LITESTREAM_SECRET_ACCESS_KEY` (a Hetzner Object Storage
-   bucket in the same location), and if wanted `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`,
+   `LITESTREAM_ACCESS_KEY_ID` and `LITESTREAM_SECRET_ACCESS_KEY` (any S3-compatible bucket:
+   Hetzner Object Storage, Cloudflare R2, Backblaze B2, AWS S3; `force-path-style` is on), and
+   if wanted `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`,
    `DIGEST_HOUR`, `RETENTION_DAYS`. Without the Litestream values the `litestream` container
    restarts in a loop until they are set; the service itself runs. `SERVICE_PASSWORD_64_ADMINTOKEN` is generated: copy it into
    the app (Review panel › Review service › token, or `prefs.set {reviewToken}`), together with

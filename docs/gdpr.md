@@ -23,7 +23,8 @@ the bracketed parts with your own details.
 
 | Who | What | Where | Agreement |
 |---|---|---|---|
-| Hetzner Online GmbH | Server (Cloud VPS) and object storage (Litestream replica, backups) | Falkenstein or Nuremberg, DE | DPA in the Hetzner Cloud console (Account › Data processing agreement) |
+| The hosting provider of the VPS (Hetzner Online GmbH in the EU setup; a US provider such as RackNerd LLC means reviewers' data leaves the EU and the record needs a transfer basis: the provider's DPA with standard contractual clauses, or its Data Privacy Framework listing) | Server | Where the VPS is | The provider's DPA, signed or accepted in its portal |
+| The object-storage provider (Hetzner Object Storage, Cloudflare R2, Backblaze B2 or AWS S3) | Litestream replica and nightly backups | The bucket's region | The provider's DPA |
 | Scaleway SAS, or Amazon Web Services EMEA SARL | Outgoing mail (magic links, invites, reminders, mentions, digests) | Paris, FR, or eu-central-1 (Frankfurt), DE | Scaleway: DPA in the console; AWS: DPA accepted in the account (Artifact) |
 | Cloudflare, Inc. (optional) | Turnstile challenge on sign-in and join forms | Global edge; data under the EU-US DPF | DPA at cloudflare.com/cloudflare-customer-dpa |
 
