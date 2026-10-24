@@ -19,7 +19,7 @@ services:
     expose:
       - "8080"
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET / HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q 'DesignCraft Review' <&3"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"ok\":true' <&3"]
       interval: 30s
       timeout: 5s
       retries: 3

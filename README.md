@@ -102,15 +102,18 @@ Rust). Coolify fills in the domain and a 64-character owner token.
 2. **Resource**: in Coolify, New Resource › the GitHub repository (through the Coolify GitHub
    app for a private one) › Build pack **Docker Compose**; Base Directory `/`, Docker Compose
    Location `/deploy/coolify/docker-compose.yaml`; Load Compose File.
-3. **Domain**: on the `review` service, set the domain (`https://review.example.com`; its DNS A
-   record points at the server). Coolify routes it to port 8080 and derives `PUBLIC_ORIGIN`
-   from it.
+3. **Domain**: on the `review` service, set the domain with `https://` (`https://review.example.com`
+   with an A record to the server, or Coolify's generated `sslip.io` name with `https://` put in
+   front; Coolify fetches the certificate). Plain `http://` can't work: the session cookie is
+   `__Host-` prefixed and Secure, so browsers drop it. Coolify routes the domain to port 8080 and
+   derives `PUBLIC_ORIGIN` from it.
 4. **Environment variables**: `GHCR_OWNER` (your GitHub user or organisation, lowercase),
    `SMTP_URL` and `MAIL_FROM` (Scaleway TEM or SES eu-central-1, with SPF, DKIM and DMARC set on
    the domain), `LITESTREAM_BUCKET`, `LITESTREAM_ENDPOINT`, `LITESTREAM_REGION`,
    `LITESTREAM_ACCESS_KEY_ID` and `LITESTREAM_SECRET_ACCESS_KEY` (a Hetzner Object Storage
    bucket in the same location), and if wanted `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET`,
-   `DIGEST_HOUR`, `RETENTION_DAYS`. `SERVICE_PASSWORD_64_ADMINTOKEN` is generated: copy it into
+   `DIGEST_HOUR`, `RETENTION_DAYS`. Without the Litestream values the `litestream` container
+   restarts in a loop until they are set; the service itself runs. `SERVICE_PASSWORD_64_ADMINTOKEN` is generated: copy it into
    the app (Review panel › Review service › token, or `prefs.set {reviewToken}`), together with
    the domain as the server.
 5. **Deploy**, then `curl https://review.example.com/healthz` says `"ok":true`; the Logs tab

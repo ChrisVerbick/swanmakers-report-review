@@ -11,7 +11,8 @@ services:
     image: ghcr.io/${GHCR_OWNER:-chrisverbick}/swanmakers-report-review:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
-      SERVICE_FQDN_REVIEW_8080: /
+      # Declaring the URL variable is what makes Coolify generate it (and route the domain to 8080).
+      SERVICE_URL_REVIEW_8080: /
       PUBLIC_ORIGIN: ${SERVICE_URL_REVIEW_8080}
       ADMIN_TOKEN: ${SERVICE_PASSWORD_64_ADMINTOKEN}
       BIND: 0.0.0.0:8080
@@ -33,7 +34,7 @@ services:
     security_opt:
       - no-new-privileges:true
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"ok\":true' <&3"]
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /healthz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"ok\":true' <&3"]
       interval: 30s
       timeout: 5s
       retries: 3
