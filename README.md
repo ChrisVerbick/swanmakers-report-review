@@ -102,11 +102,12 @@ Rust). Coolify fills in the domain and a 64-character owner token.
 2. **Resource**: in Coolify, New Resource › the GitHub repository (through the Coolify GitHub
    app for a private one) › Build pack **Docker Compose**; Base Directory `/`, Docker Compose
    Location `/deploy/coolify/docker-compose.yaml`; Load Compose File.
-3. **Domain**: on the `review` service, set the domain with `https://` (`https://review.example.com`
-   with an A record to the server, or Coolify's generated `sslip.io` name with `https://` put in
-   front; Coolify fetches the certificate). Plain `http://` can't work: the session cookie is
-   `__Host-` prefixed and Secure, so browsers drop it. Coolify routes the domain to port 8080 and
-   derives `PUBLIC_ORIGIN` from it.
+3. **Domain**: under Domains, add `https://review.example.com` for the `review` service (an A
+   record for it points at the server; Coolify fetches the certificate). It must be a domain you
+   own: Coolify's generated `sslip.io` name only works over `http://`, since Let's Encrypt
+   rate-limits that shared zone, and plain `http://` can't work here because the session cookie
+   is `__Host-` prefixed and Secure, so browsers drop it. Coolify routes the domain to port 8080
+   and derives `PUBLIC_ORIGIN` from it.
 4. **Environment variables**: `GHCR_OWNER` (your GitHub user or organisation, lowercase),
    `SMTP_URL` and `MAIL_FROM` (Scaleway TEM or SES eu-central-1, with SPF, DKIM and DMARC set on
    the domain), `LITESTREAM_BUCKET`, `LITESTREAM_ENDPOINT`, `LITESTREAM_REGION`,
