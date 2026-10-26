@@ -9,8 +9,10 @@ RUN cargo build --release -p server
 RUN cd web && trunk build --release
 
 FROM debian:bookworm-slim
+# /data is owned by the service's user: a fresh named volume takes that ownership when it is first
+# mounted there, so the service can create its folders without running as root.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --uid 10001 --create-home review
+    && useradd --system --uid 10001 --create-home review && mkdir -p /data && chown review:review /data
 COPY --from=build /src/target/release/server /usr/local/bin/designcraft-review
 COPY --from=build /src/web/dist /web
 USER review
