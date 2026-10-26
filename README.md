@@ -106,8 +106,10 @@ Rust). Coolify fills in the domain and a 64-character owner token.
    record for it points at the server; Coolify fetches the certificate). It must be a domain you
    own: Coolify's generated `sslip.io` name only works over `http://`, since Let's Encrypt
    rate-limits that shared zone, and plain `http://` can't work here because the session cookie
-   is `__Host-` prefixed and Secure, so browsers drop it. Coolify routes the domain to port 8080
-   and derives `PUBLIC_ORIGIN` from it.
+   is `__Host-` prefixed and Secure, so browsers drop it. Coolify routes the domain to port 8080.
+   Then set `PUBLIC_ORIGIN` to the same address (`https://review.example.com`, no trailing slash)
+   under Environment Variables: the service's first log line must say `public origin https://…`,
+   or every sign-in and comment is refused.
 4. **Environment variables**: `GHCR_OWNER` (your GitHub user or organisation, lowercase),
    `SMTP_URL` and `MAIL_FROM` (Scaleway TEM or SES eu-central-1, with SPF, DKIM and DMARC set on
    the domain), `LITESTREAM_BUCKET`, `LITESTREAM_ENDPOINT`, `LITESTREAM_REGION`,

@@ -11,9 +11,11 @@ services:
     image: ghcr.io/${GHCR_OWNER:-chrisverbick}/swanmakers-report-review:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
-      # Declaring the URL variable is what makes Coolify generate it (and route the domain to 8080).
+      # Declaring the URL variable lets Coolify generate a domain and route it to 8080.
       SERVICE_URL_REVIEW_8080: /
-      PUBLIC_ORIGIN: ${SERVICE_URL_REVIEW_8080}
+      # The origin reviewers use, e.g. https://review.example.com: set it in Coolify's Environment
+      # Variables (the generated URL is only the fallback, and isn't always produced).
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-${SERVICE_URL_REVIEW_8080}}
       ADMIN_TOKEN: ${SERVICE_PASSWORD_64_ADMINTOKEN}
       BIND: 0.0.0.0:8080
       DATA_DIR: /data
